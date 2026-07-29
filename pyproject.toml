@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "multi-ivf"
+version = "0.1.0"
+description = "Enhanced IVF index with support for multi-assign, multi-probe search strategies, and mean centering."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+dependencies = [
+    "numpy>=2.4,<3.0",
+    "pandas>=3.0,<4.0",
+    "faiss-gpu-cu11>=1.14,<1.15",
+    "tqdm>=4.66,<5.0",
+    "psutil>=7.0,<8.0",
+    "pyarrow>=24.0,<25.0",
+    "joblib>=1.5,<2.0",
+]
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/tommyktech/multi-ivf"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/multi_ivf"]

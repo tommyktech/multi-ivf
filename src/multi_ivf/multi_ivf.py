@@ -1,0 +1,364 @@
+import numpy as np
+import random, faiss, joblib
+from tqdm import tqdm
+
+class MultiIVF:
+    """
+    Enhanced IVF index with support for multi-assign, multi-probe search strategies, and mean centering.
+
+    Parameters
+    ----------
+    n_clusters : int
+        Number of clusters for each seed.
+    n_seeds : int, default=10
+        Number of seeds.
+    max_iter : int, default=20
+        Maximum number of KMeans iterations.
+    sample_size : int, default=81920
+        Number of samples used for KMeans training.
+    batch_size : int, default=8192
+        Batch size used during search.
+    n_init : int, default=1
+        Number of KMeans initializations.
+    n_iters_finish : int, default=0
+        Number of additional refinement iterations.
+    tol : float, default=1e-5
+        Convergence tolerance for KMeans.
+    use_mean_centering : bool, default=False
+        Whether to apply mean centering to the vectors.
+    max_seed : int, default=99999
+        Maximum value used when generating random seeds.
+    gpu_id : int | None, default=None
+        GPU device ID. If None, CPU is used.
+    random_state : int, default=432
+        Random seed for reproducibility.
+    tqdm_disable : bool, default=True
+        Whether to disable tqdm progress bars.
+    """
+    def __init__(
+            self, 
+            n_clusters:int, 
+            n_seeds:int=10, 
+            max_iter:int=20, 
+            sample_size:int=8192, 
+            batch_size:int=8192, 
+            n_init:int=1, 
+            n_iters_finish:int=0, 
+            tol:float=1e-5, 
+            use_mean_centering:bool=False, 
+            max_seed:int=99999, 
+            gpu_id:int=None, 
+            random_state:int=432, 
+            tqdm_disable:bool=True
+        ):
+        self.n_seeds = n_seeds
+        self.n_clusters = n_clusters
+        self.max_iter = max_iter
+        self.sample_size = sample_size
+        self.batch_size = batch_size
+        self.n_init = n_init
+        self.n_iters_finish = n_iters_finish
+        self.tol = tol
+        self.use_mean_centering = use_mean_centering
+        self.max_seed = max_seed
+        self.gpu_id = gpu_id
+        self.random_state = random_state
+        self.tqdm_disable = tqdm_disable
+        self.mean = None
+        
+
+    ########################################
+    # save and load
+    ########################################
+    def save(self, path:str, level:int=3):
+        joblib.dump(self, path, compress=("gzip", level))
+
+
+    @classmethod
+    def load(cls, path:str):
+        return joblib.load(path)
+    
+
+    ########################################
+    # helpers
+    ########################################
+    def _iter_batches(self, X: np.ndarray, batch_size: int):
+        n = X.shape[0]
+        for start in range(0, n, batch_size):
+            end = min(n, start + batch_size)
+            yield start, X[start:end]
+
+
+    def _generate_faiss_flat_index(self, dim):
+        if self.gpu_id is None:
+            index = faiss.IndexFlatIP(dim)
+        else:
+            res = faiss.StandardGpuResources()
+            cpu_index = faiss.IndexFlatIP(dim)
+            index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+        return index
+    
+
+    def _ensure_faiss_array(self, x: np.ndarray) -> np.ndarray:
+        if (
+            not isinstance(x, np.ndarray)
+            or x.dtype != np.float32
+            or not x.flags.c_contiguous
+        ):
+            raise ValueError("X must be an instance of ndarray, and of dtype float32, and contiguous.")
+    
+
+    def is_trained(self):
+        if self.cluster_centers_ is None:
+            return False
+        return True
+
+
+    ########################################
+    # kmeans trainer functions
+    ########################################
+    def _faiss_kmeans(
+        self,
+        X: np.ndarray,
+        n_clusters: int,
+        sample_size: int,
+        seed: int,
+        max_iter: int = 10,
+        nredo: int = 1,
+    ) -> np.ndarray:
+        N, D = X.shape
+        if N == 0:
+            raise ValueError("X must not be an empty data. ")
+
+        kmeans = faiss.Kmeans(
+            D,
+            n_clusters,
+            niter=max_iter,
+            nredo=nredo,
+            spherical=True,
+            verbose=False,
+            seed=seed,
+            max_points_per_centroid=sample_size,
+            gpu=False if self.gpu_id is None else True,
+        )
+        kmeans.train(X)
+
+        cent = np.asarray(kmeans.centroids, dtype=np.float32, order="C")
+        return cent
+
+
+    def _exact_kmeans(
+        self,
+        X: np.ndarray,
+        centroids: np.ndarray | None,
+        batch_size: int = 8192,
+        n_iters: int = 3,
+        tol: float = 1e-4,
+        seed: int = 0,
+    ):
+        if n_iters <= 0:
+            raise ValueError("n_iters must be larger than 0.")
+        
+        rng = np.random.default_rng(seed)
+
+        if centroids is None:
+            if self.n_clusters is None:
+                raise ValueError("n_clusters is required when centroids is None")
+            idx = rng.choice(X.shape[0], size=self.n_clusters, replace=False)
+            cent = np.asarray(X[idx], dtype=np.float32, order="C")
+        else:
+            cent = np.asarray(centroids, dtype=np.float32, order="C")
+
+        faiss.normalize_L2(cent)
+        K, D = cent.shape
+        index = self._generate_faiss_flat_index(D)
+
+
+        for _ in tqdm(range(n_iters), desc=f"iter 0/{n_iters}", disable=self.tqdm_disable):
+            sums = np.zeros((K, D), dtype=np.float64)
+            counts = np.zeros((K,), dtype=np.int64)
+            index.reset()
+            index.add(cent)
+
+            all_labels = []
+            for _, x_raw in self._iter_batches(X, batch_size):
+                _, labels = index.search(x_raw, 1)
+                labels = labels.reshape(-1)
+                all_labels.append(labels)
+
+                np.add.at(counts, labels, 1)
+                np.add.at(sums, labels, x_raw.astype(np.float64))
+
+            new_cent = cent.copy()
+            nonzero = counts > 0
+            if np.any(nonzero):
+                new_cent[nonzero] = (sums[nonzero] / counts[nonzero, None]).astype(np.float32)
+
+            if np.any(~nonzero):
+                m = int((~nonzero).sum())
+                repl = rng.integers(0, cent.shape[0], size=m)
+                new_cent[~nonzero] = cent[repl]
+
+            faiss.normalize_L2(new_cent)
+
+            shift = np.max(np.linalg.norm(cent - new_cent, axis=1))
+            cent = new_cent
+            if shift < tol:
+                break
+
+        all_labels = np.concatenate(all_labels)
+        return cent, all_labels
+
+
+    def train(self, X):
+        self._ensure_faiss_array(X)
+
+        if self.use_mean_centering:
+            self.mean = X.mean(axis=0).astype(np.float32)
+            X = X - self.mean
+            faiss.normalize_L2(X)
+
+        cluster_centers_ = {}
+        base_rng = np.random.RandomState(self.random_state)
+        for s in tqdm(base_rng.randint(0, self.max_seed, size=self.n_seeds), desc="Calculating K-means centroids...", disable=self.tqdm_disable):
+            s = int(s)
+            random.seed(s)
+            np.random.seed(s)
+
+            centroids = self._faiss_kmeans(
+                X=X,
+                n_clusters=self.n_clusters,
+                sample_size=self.sample_size,
+                seed=s,
+                max_iter=self.max_iter,
+                nredo=self.n_init,
+            )
+        
+            if self.n_iters_finish:
+                print(f"Refining {self.n_iters_finish} times")
+                centroids, _ = self._exact_kmeans(
+                    X=X,
+                    centroids=centroids,
+                    batch_size=self.batch_size,
+                    n_iters=self.n_iters_finish,
+                    tol=self.tol,
+                    seed=s,
+                )
+
+            cluster_centers_[s] = centroids
+        self.cluster_centers_ = cluster_centers_
+
+
+    def _assign_once(self, X, centroids, assign_margin: float | None, n_assignments: int | None) -> list[set[int]]:
+        if centroids.dtype != np.float32:
+            raise ValueError("centroids.dtype must be np.float32")
+        if X.dtype != np.float32:
+            raise ValueError("X.dtype must be np.float32")
+
+        N, D = X.shape
+        index = self._generate_faiss_flat_index(D)
+        index.add(centroids)
+
+        labels = np.empty(N, dtype=object)
+
+        for i in range(0, N, self.batch_size):
+            j = min(i + self.batch_size, N)
+
+            X_chunk = X[i:j]
+            if not X_chunk.flags.c_contiguous:
+                X_chunk = np.ascontiguousarray(X_chunk, dtype=np.float32)
+
+            if self.use_mean_centering:
+                X_chunk = X_chunk - self.mean
+                faiss.normalize_L2(X_chunk)
+
+            # Search against all n_clusters centroids to get full distances and labels
+            d_chunk, l_chunk = index.search(X_chunk, self.n_clusters)
+
+            for r in range(len(l_chunk)):
+                labels_r = l_chunk[r]
+                sims_r = d_chunk[r]
+                if assign_margin is not None:
+                    keep = sims_r >= (sims_r[0] - assign_margin)
+                    labels_r = labels_r[keep]
+
+                # Limit the number of labels to n_assignments after applying the threshold
+                if n_assignments is not None:
+                    labels_r = labels_r[:n_assignments]
+
+                labels[i + r] = set(labels_r)
+
+        return list(labels)
+    
+
+    def assign(self, X:np.ndarray, assign_margin:float=0.1, n_assignments=None) -> list[dict[int, set[int]]]:
+        """
+        Assign cluster labels for each embedding data
+        """
+        self._ensure_faiss_array(X)
+        
+        if n_assignments is not None and n_assignments > self.n_clusters:
+            raise ValueError("n_assignments > n_clusters")
+        if n_assignments is not None and n_assignments < 1:
+            raise ValueError("n_assignments < 1")
+
+        N = X.shape[0]
+        assignments = np.empty(N, dtype=object)
+        for i in range(N):
+            assignments[i] = {}
+
+        for seed, centroids in tqdm(
+            self.cluster_centers_.items(),
+            desc="Assigning K-means centroids...",
+            disable=self.tqdm_disable,
+        ):
+            cluster_ids_per_vector  = self._assign_once(X, centroids, assign_margin, n_assignments)
+            for i, cluster_ids in enumerate(cluster_ids_per_vector):
+                assignments[i][seed] = cluster_ids
+
+        return list(assignments)
+
+
+    def _choose_nearest_seed(self, query, n_probe) -> tuple[int, np.ndarray]:
+        """
+        Select the seed (cluster group) whose top-`n_probe` centroids have the
+        highest mean similarity to the query, and return that seed along with
+        the similarity scores of all its centroids.
+        """
+        best_mean = None
+        best_seed = None
+        best_sims = None
+        for seed, centroids in self.cluster_centers_.items():
+            sims = centroids.dot(query)
+            k = min(n_probe, centroids.shape[0])
+            if k <= 0:
+                raise ValueError("n_probe must be larger than 0")
+            idx = np.argpartition(-sims, k - 1)[:k]
+            mean = float(sims[idx].mean())
+            if best_mean is None or mean > best_mean:
+                best_mean = mean
+                best_seed = seed
+                best_sims = sims
+
+        return best_seed, best_sims
+
+
+    def search(self, query, n_probe:int=1) -> tuple[int, set[int]]:
+        """
+        Find the best-matching seed for `query` and return the indices of its
+        top-`n_probe` nearest centroid labels within that seed.
+
+        Returns:
+            A tuple of (seed, set of centroid labels).
+        """
+        n_probe = min(n_probe, self.n_clusters)
+
+        if self.use_mean_centering:
+            query = np.ascontiguousarray(query.reshape(1, -1), dtype=np.float32)
+            query = query - self.mean
+            faiss.normalize_L2(query)
+            query = query[0]
+
+        best_seed, best_sims = self._choose_nearest_seed(query, n_probe)
+        nearest_labels = np.argpartition(-best_sims, n_probe - 1)[:n_probe]
+        return best_seed, set(nearest_labels)
