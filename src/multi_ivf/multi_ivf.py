@@ -261,6 +261,12 @@ class MultiIVF:
 
         labels = np.empty(N, dtype=object)
 
+        # prepare topk variable for `index.search`
+        search_topk = self.n_clusters
+        if n_assignments is not None and n_assignments < self.n_clusters:
+            # Limit the number of labels to n_assignments
+            search_topk = n_assignments
+
         for i in range(0, N, self.batch_size):
             j = min(i + self.batch_size, N)
 
@@ -272,8 +278,7 @@ class MultiIVF:
                 X_chunk = X_chunk - self.mean
                 faiss.normalize_L2(X_chunk)
 
-            # Search against all n_clusters centroids to get full distances and labels
-            d_chunk, l_chunk = index.search(X_chunk, self.n_clusters)
+            d_chunk, l_chunk = index.search(X_chunk, search_topk)
 
             for r in range(len(l_chunk)):
                 labels_r = l_chunk[r]
@@ -281,10 +286,6 @@ class MultiIVF:
                 if assign_margin is not None:
                     keep = sims_r >= (sims_r[0] - assign_margin)
                     labels_r = labels_r[keep]
-
-                # Limit the number of labels to n_assignments after applying the threshold
-                if n_assignments is not None:
-                    labels_r = labels_r[:n_assignments]
 
                 labels[i + r] = set(labels_r)
 
