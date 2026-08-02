@@ -40,9 +40,9 @@ else:
 
     mivf = MultiIVF(
         n_clusters=n_clusters, 
-        n_seeds=kmeans_n_seeds, 
-        sample_size=N, 
-        batch_size=N, 
+        n_ensembles=kmeans_n_seeds, 
+        # max_points_per_centroid=100, 
+        # flat_search_batch_size=N, 
         use_mean_centering=True,
         tqdm_disable=False
         )

@@ -4,20 +4,20 @@ from tqdm import tqdm
 
 class MultiIVF:
     """
-    Enhanced IVF index with support for multi-assign, multi-probe search strategies, and mean centering.
+    Enhanced IVF index with support for multi-cluster, multi-assign, multi-probe search strategies, and mean centering.
 
     Parameters
     ----------
     n_clusters : int
         Number of clusters for each seed.
-    n_seeds : int, default=10
-        Number of seeds.
+    n_ensembles : int, default=10
+        Number of ensembles.
     max_iter : int, default=20
         Maximum number of KMeans iterations.
-    sample_size : int, default=81920
-        Number of samples used for KMeans training.
-    batch_size : int, default=8192
-        Batch size used during search.
+    max_points_per_centroid : int, default=100
+        Number of samples used for Faiss KMeans training.
+    flat_search_batch_size : int, default=8192
+        Batch size used during faiss flat index search.
     n_init : int, default=1
         Number of KMeans initializations.
     n_iters_finish : int, default=0
@@ -38,10 +38,10 @@ class MultiIVF:
     def __init__(
             self, 
             n_clusters:int, 
-            n_seeds:int=10, 
+            n_ensembles:int=10, 
             max_iter:int=20, 
-            sample_size:int=8192, 
-            batch_size:int=8192, 
+            max_points_per_centroid:int=100,
+            flat_search_batch_size:int=8192,
             n_init:int=1, 
             n_iters_finish:int=0, 
             tol:float=1e-5, 
@@ -51,11 +51,11 @@ class MultiIVF:
             random_state:int=432, 
             tqdm_disable:bool=True
         ):
-        self.n_seeds = n_seeds
         self.n_clusters = n_clusters
+        self.n_ensembles = n_ensembles
         self.max_iter = max_iter
-        self.sample_size = sample_size
-        self.batch_size = batch_size
+        self.max_points_per_centroid = max_points_per_centroid
+        self.flat_search_batch_size = flat_search_batch_size
         self.n_init = n_init
         self.n_iters_finish = n_iters_finish
         self.tol = tol
@@ -121,7 +121,7 @@ class MultiIVF:
         self,
         X: np.ndarray,
         n_clusters: int,
-        sample_size: int,
+        max_points_per_centroid: int,
         seed: int,
         max_iter: int = 10,
         nredo: int = 1,
@@ -138,7 +138,7 @@ class MultiIVF:
             spherical=True,
             verbose=False,
             seed=seed,
-            max_points_per_centroid=sample_size,
+            max_points_per_centroid=max_points_per_centroid,
             gpu=False if self.gpu_id is None else True,
         )
         kmeans.train(X)
@@ -220,7 +220,7 @@ class MultiIVF:
 
         cluster_centers_ = {}
         base_rng = np.random.RandomState(self.random_state)
-        for s in tqdm(base_rng.randint(0, self.max_seed, size=self.n_seeds), desc="Calculating K-means centroids...", disable=self.tqdm_disable):
+        for s in tqdm(base_rng.randint(0, self.max_seed, size=self.n_ensembles), desc="Calculating K-means centroids...", disable=self.tqdm_disable):
             s = int(s)
             random.seed(s)
             np.random.seed(s)
@@ -228,7 +228,7 @@ class MultiIVF:
             centroids = self._faiss_kmeans(
                 X=X,
                 n_clusters=self.n_clusters,
-                sample_size=self.sample_size,
+                max_points_per_centroid=self.max_points_per_centroid,
                 seed=s,
                 max_iter=self.max_iter,
                 nredo=self.n_init,
@@ -239,7 +239,7 @@ class MultiIVF:
                 centroids, _ = self._exact_kmeans(
                     X=X,
                     centroids=centroids,
-                    batch_size=self.batch_size,
+                    batch_size=self.flat_search_batch_size,
                     n_iters=self.n_iters_finish,
                     tol=self.tol,
                     seed=s,
@@ -267,8 +267,8 @@ class MultiIVF:
             # Limit the number of labels to n_assignments
             search_topk = n_assignments
 
-        for i in range(0, N, self.batch_size):
-            j = min(i + self.batch_size, N)
+        for i in range(0, N, self.flat_search_batch_size):
+            j = min(i + self.flat_search_batch_size, N)
 
             X_chunk = X[i:j]
             if not X_chunk.flags.c_contiguous:
