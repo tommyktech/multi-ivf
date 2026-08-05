@@ -323,7 +323,7 @@ class MultiIVF:
 
         for ensemble_label, centroids in tqdm(
             self.cluster_centers_.items(),
-            desc="Assigning K-means centroids...",
+            desc="Assigning vectors to clusters...",
             disable=self.tqdm_disable,
         ):
             cluster_ids_per_vector  = self._assign_once(X, centroids, assign_margin, n_assignments)
