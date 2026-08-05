@@ -9,7 +9,7 @@ class MultiIVF:
     Parameters
     ----------
     n_clusters : int
-        Number of clusters for each seed.
+        Number of clusters for each ensemble.
     n_ensembles : int, default=10
         Number of ensembles.
     max_iter : int, default=20
@@ -64,7 +64,6 @@ class MultiIVF:
         self.gpu_id = gpu_id
         self.random_state = random_state
         self.tqdm_disable = tqdm_disable
-        self.mean = None
         
 
     ########################################
@@ -77,7 +76,21 @@ class MultiIVF:
     @classmethod
     def load(cls, path:str):
         return joblib.load(path)
-    
+
+
+    def __setstate__(self, state: dict):
+        attr_renames = {
+            "mean": "mean_centers_",
+            "n_seeds": "n_ensembles",
+            "sample_size": "max_points_per_centroid",
+            "batch_size": "flat_search_batch_size",
+        }
+        for old_name, new_name in attr_renames.items():
+            if old_name in state:
+                state[new_name] = state.pop(old_name)
+
+        self.__dict__.update(state)
+
 
     ########################################
     # helpers
@@ -214,22 +227,22 @@ class MultiIVF:
         self._ensure_faiss_array(X)
 
         if self.use_mean_centering:
-            self.mean = X.mean(axis=0).astype(np.float32)
-            X = X - self.mean
+            self.mean_centers_ = X.mean(axis=0).astype(np.float32)
+            X = X - self.mean_centers_
             faiss.normalize_L2(X)
 
         cluster_centers_ = {}
         base_rng = np.random.RandomState(self.random_state)
-        for s in tqdm(base_rng.randint(0, self.max_seed, size=self.n_ensembles), desc="Calculating K-means centroids...", disable=self.tqdm_disable):
-            s = int(s)
-            random.seed(s)
-            np.random.seed(s)
+        for ensemble_seed in tqdm(base_rng.randint(0, self.max_seed, size=self.n_ensembles), desc="Calculating K-means centroids...", disable=self.tqdm_disable):
+            ensemble_seed = int(ensemble_seed)
+            random.seed(ensemble_seed)
+            np.random.seed(ensemble_seed)
 
             centroids = self._faiss_kmeans(
                 X=X,
                 n_clusters=self.n_clusters,
                 max_points_per_centroid=self.max_points_per_centroid,
-                seed=s,
+                seed=ensemble_seed,
                 max_iter=self.max_iter,
                 nredo=self.n_init,
             )
@@ -242,10 +255,10 @@ class MultiIVF:
                     batch_size=self.flat_search_batch_size,
                     n_iters=self.n_iters_finish,
                     tol=self.tol,
-                    seed=s,
+                    seed=ensemble_seed,
                 )
 
-            cluster_centers_[s] = centroids
+            cluster_centers_[ensemble_seed] = centroids
         self.cluster_centers_ = cluster_centers_
 
 
@@ -275,7 +288,7 @@ class MultiIVF:
                 X_chunk = np.ascontiguousarray(X_chunk, dtype=np.float32)
 
             if self.use_mean_centering:
-                X_chunk = X_chunk - self.mean
+                X_chunk = X_chunk - self.mean_centers_
                 faiss.normalize_L2(X_chunk)
 
             d_chunk, l_chunk = index.search(X_chunk, search_topk)
@@ -308,28 +321,28 @@ class MultiIVF:
         for i in range(N):
             assignments[i] = {}
 
-        for seed, centroids in tqdm(
+        for ensemble_label, centroids in tqdm(
             self.cluster_centers_.items(),
             desc="Assigning K-means centroids...",
             disable=self.tqdm_disable,
         ):
             cluster_ids_per_vector  = self._assign_once(X, centroids, assign_margin, n_assignments)
             for i, cluster_ids in enumerate(cluster_ids_per_vector):
-                assignments[i][seed] = cluster_ids
+                assignments[i][ensemble_label] = cluster_ids
 
         return list(assignments)
 
 
-    def _choose_nearest_seed(self, query, n_probe) -> tuple[int, np.ndarray]:
+    def _choose_nearest_ensemble_label(self, query, n_probe) -> tuple[int, np.ndarray]:
         """
         Select the seed (cluster group) whose top-`n_probe` centroids have the
         highest mean similarity to the query, and return that seed along with
         the similarity scores of all its centroids.
         """
         best_mean = None
-        best_seed = None
+        best_ensemble_label = None
         best_sims = None
-        for seed, centroids in self.cluster_centers_.items():
+        for ensemble_label, centroids in self.cluster_centers_.items():
             sims = centroids.dot(query)
             k = min(n_probe, centroids.shape[0])
             if k <= 0:
@@ -338,28 +351,28 @@ class MultiIVF:
             mean = float(sims[idx].mean())
             if best_mean is None or mean > best_mean:
                 best_mean = mean
-                best_seed = seed
+                best_ensemble_label = ensemble_label
                 best_sims = sims
 
-        return best_seed, best_sims
+        return best_ensemble_label, best_sims
 
 
     def search(self, query, n_probe:int=1) -> tuple[int, set[int]]:
         """
-        Find the best-matching seed for `query` and return the indices of its
-        top-`n_probe` nearest centroid labels within that seed.
+        Find the best-matching ensemble label for `query` and return the indices of its
+        top-`n_probe` nearest centroid labels within that ensemble label.
 
         Returns:
-            A tuple of (seed, set of centroid labels).
+            A tuple of (ensemble label, set of centroid labels).
         """
         n_probe = min(n_probe, self.n_clusters)
 
         if self.use_mean_centering:
             query = np.ascontiguousarray(query.reshape(1, -1), dtype=np.float32)
-            query = query - self.mean
+            query = query - self.mean_centers_
             faiss.normalize_L2(query)
             query = query[0]
 
-        best_seed, best_sims = self._choose_nearest_seed(query, n_probe)
+        best_ensemble_label, best_sims = self._choose_nearest_ensemble_label(query, n_probe)
         nearest_labels = np.argpartition(-best_sims, n_probe - 1)[:n_probe]
-        return best_seed, set(nearest_labels)
+        return best_ensemble_label, set(nearest_labels)
