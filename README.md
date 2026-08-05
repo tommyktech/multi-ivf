@@ -98,15 +98,7 @@ assignments = mivf.assign(
 for query in X_query:
     q_ensemble, q_labels = mivf.search(query, n_probe=10) # Choose n_probe based on your requirements.
 
-    candidate_idxs = set()
-    for idx, assignment in enumerate(assignments):
-        t_labels = assignment.get(q_ensemble)
-        if len(q_labels & t_labels) > 0:
-            candidate_idxs.add(idx)
-
-    X_candidates = X_train[list(candidate_idxs)]
-
-    # Then rerank with exact KNN and retrieve top-K data
+    # Then collect candidate vectors from your local data or vector database using the query's cluster labels
 
 ```
 
