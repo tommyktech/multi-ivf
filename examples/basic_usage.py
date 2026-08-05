@@ -1,27 +1,50 @@
 from multi_ivf import MultiIVF
 
 #############################
+# Helper functions
+#############################
+import shutil
+def print_side_by_side(left_title, left_lines, right_title, right_lines):
+    term_width = shutil.get_terminal_size(fallback=(120, 30)).columns
+
+    gap = 4
+    col_width = (term_width - gap) // 2
+
+    print("=" * term_width)
+    print(f"{left_title:<{col_width}}{' ' * gap}{right_title}")
+
+    n = max(len(left_lines), len(right_lines))
+    for i in range(n):
+        left = left_lines[i] if i < len(left_lines) else ""
+        right = right_lines[i] if i < len(right_lines) else ""
+
+        # Shrink wide lines
+        left = left[:col_width-1]
+        right = right[:col_width-1]
+
+        print(f"{left:<{col_width}}{' ' * gap}{right}")
+
+
+#############################
 # Load sample dataset
 #############################
 import pandas as pd
 import numpy as np
+import os
 df = pd.read_parquet("./data/wiki40b_en_embeddings_30000.parquet")
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+
 
 #############################
 # Split dataset
 #############################
-n = len(df)
-train_end = 10000
-corpus_end = 29500
+train_end = len(df) - 5 
 
-df_train  = df.iloc[:train_end]
-df_corpus = df.iloc[train_end:corpus_end]
-df_query  = df.iloc[corpus_end:]
-
+df_train = df.iloc[:train_end]
+df_query = df.iloc[train_end:]
 X_train  = np.stack(df_train.embedding.values)
-X_corpus = np.stack(df_corpus.embedding.values)
 X_query  = np.stack(df_query.embedding.values)
+
 
 #############################
 # Train multi ivf model
@@ -34,15 +57,13 @@ if os.path.exists(output_path):
 else:
     # train mIVF
     print("Training MultiIVF...")
-    kmeans_n_seeds = 10
+    n_ensembles = 10
     N = X_train.shape[0]
     n_clusters = int(N / 100)
 
     mivf = MultiIVF(
         n_clusters=n_clusters, 
-        n_ensembles=kmeans_n_seeds, 
-        # max_points_per_centroid=100, 
-        # flat_search_batch_size=N, 
+        n_ensembles=n_ensembles, 
         use_mean_centering=True,
         tqdm_disable=False
         )
@@ -53,54 +74,59 @@ else:
 #############################
 # Assign mIVF labels
 #############################
-print("Assigning labels for corpus dataset...")
-assignments = mivf.assign(X_corpus)
-df_corpus["assignment"] = assignments
+print("Assigning labels for train dataset...")
+assignments = mivf.assign(X_train)
+
 
 #############################
-# Evaluate recall
+# Search embeddings and Evaluate model
 #############################
-print("Evaluating MultiIVF model...")
+print("Search embeddings and evaluating MultiIVF model...")
 
 # Prepare index for ground truth
 import faiss
-from tqdm import tqdm
-dim = X_corpus.shape[1]
+dim = X_train.shape[1]
 index = faiss.IndexFlatIP(dim)
-index.add(X_corpus)
+index.add(X_train)
 
-# search conditions
+# Search conditions
 top_k = 10
 n_probe = 5
 
+# Compare search results with ground truth
 recalls = []
-pbar = tqdm(df_query["embedding"], total=len(df_query), bar_format="{n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}")
-for query in pbar:
-    pbar.set_description(f"n_probe={n_probe}")
-    # ground truth
-    _, gt_ids = index.search(query.reshape(1, -1), k=top_k)
+for i, query in enumerate(X_query):
+    # Calculate ground truth
+    _, gt_idxs = index.search(query.reshape(1, -1), k=top_k)
+    gt_top_k_texts = [row["text"] for _, row in df_train.iloc[gt_idxs[0]].iterrows()]
 
     # ANN search
-    q_seed, q_labels = mivf.search(query, n_probe=n_probe)
-    candidate_ids = set()
-    for i, assignment in enumerate(assignments):
-        c_labels = assignment.get(q_seed)
-        if len(q_labels & c_labels) > 0:
-            candidate_ids.add(i)
+    q_ensemble, q_labels = mivf.search(query, n_probe=n_probe)
+    candidate_idxs = set()
+    for idx, assignment in enumerate(assignments):
+        t_labels = assignment.get(q_ensemble)
+        if len(q_labels & t_labels) > 0:
+            candidate_idxs.add(idx)
 
-    # ranking with KNN
-    candidate_ids = np.array(list(candidate_ids))
-    X_corpus_candidates = X_corpus[candidate_ids]
+    # Ranking with KNN
+    candidate_idxs = np.array(list(candidate_idxs))
+    X_candidates = X_train[candidate_idxs]
     sub_index = faiss.IndexFlatIP(dim)
-    sub_index.add(X_corpus_candidates)
-    _, pred_ids = sub_index.search(query.reshape(1, -1), k=top_k)
-    
-    # Evaluate recall
-    recall = len(set(candidate_ids[pred_ids[0]]) & set(gt_ids[0])) / top_k
+    sub_index.add(X_candidates)
+    _, search_idxs = sub_index.search(query.reshape(1, -1), k=top_k)
+    preds_idxs = list(candidate_idxs[search_idxs[0]])
+    preds_top_k_texts = [row["text"] for _, row in df_train.iloc[preds_idxs].iterrows()]
+
+    # Calculate recall value
+    recall = len(set(preds_idxs) & set(gt_idxs[0])) / top_k
     recalls.append(recall)
 
-    # update progress
-    pbar.set_postfix(Recall=sum(recalls) / len(recalls))
-    pbar.update(1)
+    # Show results
+    left_lines, right_lines = [], []
+    for j, t in enumerate(gt_top_k_texts):
+        left_lines.append(t[:100].replace("\n", " "))
+    for j, t in enumerate(preds_top_k_texts):
+        right_lines.append(t[:100].replace("\n", " "))
+    print_side_by_side(f"Ground Truth (Query {i+1}):", left_lines, f"Search Results (Query {i+1}):", right_lines)
 
-print(f"Final Recall@{top_k}: {sum(recalls) / len(recalls):.04f}")
+print(f"\nAverage Recall@{top_k}: {sum(recalls) / len(recalls):.04f}")
