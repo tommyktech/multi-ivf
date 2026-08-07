@@ -15,10 +15,11 @@ This library is particularly well suited for systems that perform exact rerankin
 
 ### Benchmark Setup
 
-- **Dataset size:** 1,000,000 vectors
+- **Dataset size:** 1,000,000+ vectors
 - **Dataset:** [wiki40b (English)](https://huggingface.co/datasets/google/wiki40b)
 - **Embedding model:** [granite-embedding-97m-multilingual-r2](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2)
 - **Target recall:** Recall@10 = 0.95, Recall@100 = 0.95
+- **Dataset Download:** Available from [GitHub Releases](https://github.com/tommyktech/multi-ivf/releases/tag/benchmark-0.1.0)
 
 ### Evaluation
 
