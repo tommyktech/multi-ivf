@@ -41,7 +41,7 @@ mivf.train(X_train)
 # Assign mIVF labels
 #############################
 print("Assigning labels for train dataset...")
-assignments = mivf.assign(X_train)
+assignments = mivf.assign(X_train, n_assignments=100)
 
 #############################
 # Evaluate recall
