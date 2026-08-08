@@ -1,7 +1,7 @@
 <img width="2115" height="744" alt="" src="https://github.com/user-attachments/assets/b0808da6-a407-481f-bd61-059edd3db738" />
 
 
-# `multi-ivf`: Efficient IVF with Multi-Cluster Ensembles, Multi-Assignment, and Multi-Probe (Firestore-friendly!)
+# `multi-ivf`: Efficient IVF with Multi-Cluster Ensembles, Multi-Assignment, and Multi-Probe
 
 `multi-ivf` is a high-efficiency IVF library for approximate nearest neighbor search.
 
