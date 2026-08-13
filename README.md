@@ -5,7 +5,7 @@
 
 `multi-ivf` is a high-efficiency IVF library for approximate nearest neighbor search.
 
-It achieves the same recall as conventional IVF with significantly fewer candidate vectors (around 40-50% reduction), reducing the computational cost of the final exact KNN search.
+It achieves the same recall as conventional IVF with significantly fewer candidate vectors (around **40-50% reduction**), reducing the computational cost of the final exact KNN search.
 
 Unlike end-to-end ANN libraries, this library focuses only on clustering, making it easy to integrate with any database.
 
@@ -15,10 +15,10 @@ This library is particularly well suited for systems that perform exact rerankin
 
 ### Benchmark Setup
 
-- **Dataset size:** 1,000,000+ vectors
-- **Dataset:** [wiki40b (English)](https://huggingface.co/datasets/google/wiki40b)
-- **Embedding model:** [granite-embedding-97m-multilingual-r2](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2)
 - **Target recall:** Recall@10 = 0.95, Recall@100 = 0.95
+- **Dataset size:** 1,000,000+ vectors (Train vectors: 999496, Query vectors: 1000)
+- **Source Dataset:** [wiki40b (English)](https://huggingface.co/datasets/google/wiki40b)
+- **Embedding model:** [granite-embedding-97m-multilingual-r2](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2)
 - **Dataset Download:** Available from [GitHub Releases](https://github.com/tommyktech/multi-ivf/releases/tag/benchmark-0.1.0)
 
 ### Evaluation
