@@ -5,7 +5,7 @@
 
 `multi-ivf` is a high-efficiency IVF library for approximate nearest neighbor search.
 
-It achieves the same recall as conventional IVF with significantly fewer candidate vectors (around 30% reduction), reducing the computational cost of the final exact KNN search.
+It achieves the same recall as conventional IVF with significantly fewer candidate vectors (around 40-50% reduction), reducing the computational cost of the final exact KNN search.
 
 Unlike end-to-end ANN libraries, this library focuses only on clustering, making it easy to integrate with any database.
 
@@ -32,20 +32,20 @@ A smaller candidate size means fewer vectors need to be re-ranked, resulting in 
 #### Candidate Size (Recall@10 = 0.95)
 | n_clusters | Conventional IVF | Multi IVF |
 |-----------:|---------:|------:|
-| 1000 | 32504 | 23723 |
-| 2000 | 25075 | 17841 |
-| 4000 | 18536 | 13885 |
-| 6000 | 15521 | 11893 |
-| 8000 | 14342 | 9370 |
+| 1000 | 32504 | 20019 |
+| 2000 | 25075 | 15924 |
+| 4000 | 18536 | 11155 |
+| 6000 | 15521 | 8910 |
+| 8000 | 14342 | 7654 |
 
 #### Candidate Size (Recall@100 = 0.95)
 | n_clusters | Conventional IVF | Multi IVF |
 |-----------:|---------:|------:|
-| 1000 | 36511 | 23723 |
-| 2000 | 29607 | 19071 |
-| 4000 | 22946 | 16550 |
-| 6000 | 20466 | 14589 |
-| 8000 | 19134 | 13889 |
+| 1000 | 36511 | 20019 |
+| 2000 | 29607 | 15924 |
+| 4000 | 22946 | 12302 |
+| 6000 | 20466 | 10807 |
+| 8000 | 19134 | 9885 |
 
 ## Installation
 
