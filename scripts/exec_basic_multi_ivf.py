@@ -71,7 +71,7 @@ for query in pbar:
     candidate_ids = set()
     for i, assignment in enumerate(assignments):
         c_labels = assignment.get(q_seed)
-        if len(q_labels & c_labels) > 0:
+        if len(set(q_labels) & set(c_labels)) > 0:
             candidate_ids.add(i)
 
     # ranking with KNN

@@ -105,7 +105,7 @@ for i, query in enumerate(X_query):
     candidate_idxs = set()
     for idx, assignment in enumerate(assignments):
         t_labels = assignment.get(q_ensemble)
-        if len(q_labels & t_labels) > 0:
+        if len(set(q_labels) & set(t_labels)) > 0:
             candidate_idxs.add(idx)
 
     # Ranking with KNN
