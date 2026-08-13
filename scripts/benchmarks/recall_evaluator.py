@@ -177,13 +177,18 @@ class RecallEvaluator:
 
         return best_I
     
-
+    from typing import Literal
     def calc_recalls(
             self, 
             X:np.ndarray, 
             X_query:np.ndarray, 
             cluster_assignments:list, 
             n_probe:int, 
+            ensemble_selection_method: Literal[
+                "top1",
+                "mean",
+                "weighted_mean",
+                "full_weighted_mean"],
             recall_at_k:int=100
         ) -> tuple[list, list, list]:
         if n_probe > self.n_clusters:
@@ -212,18 +217,30 @@ class RecallEvaluator:
             cluster_size_list, emb_idxs_list = [], []
 
             # Search for cluster labels using the MultiIVF index
-            nearest_ensemble_label, nearest_cluster_labels = self.mivf.search(query, n_probe)
-
+            results = self.mivf.search(query, n_probe, ensemble_selection_method=ensemble_selection_method)
             # Collect candidate embedding indices and cluster size information
-            candidate_idx_set = set()
-            for cluster_label in nearest_cluster_labels:
-                corpus_idxs_in_cluster = labels_to_idxs_dict[nearest_ensemble_label][cluster_label]
-                if len(corpus_idxs_in_cluster) == 0:
-                    continue
+            if ensemble_selection_method == "full_weighted_mean":
+                candidate_idx_set = set()
+                for nearest_ensemble_label, nearest_cluster_labels in results:
+                    for cluster_label in nearest_cluster_labels:
+                        corpus_idxs_in_cluster = labels_to_idxs_dict[nearest_ensemble_label][cluster_label]
+                        if len(corpus_idxs_in_cluster) == 0:
+                            continue
 
-                cluster_size_list.append(len(corpus_idxs_in_cluster))
-                emb_idxs_list.append(corpus_idxs_in_cluster)
-                candidate_idx_set.update(corpus_idxs_in_cluster)
+                        cluster_size_list.append(len(corpus_idxs_in_cluster))
+                        emb_idxs_list.append(corpus_idxs_in_cluster)
+                        candidate_idx_set.update(corpus_idxs_in_cluster)
+            else:
+                nearest_ensemble_label, nearest_cluster_labels = results
+                candidate_idx_set = set()
+                for cluster_label in nearest_cluster_labels:
+                    corpus_idxs_in_cluster = labels_to_idxs_dict[nearest_ensemble_label][cluster_label]
+                    if len(corpus_idxs_in_cluster) == 0:
+                        continue
+
+                    cluster_size_list.append(len(corpus_idxs_in_cluster))
+                    emb_idxs_list.append(corpus_idxs_in_cluster)
+                    candidate_idx_set.update(corpus_idxs_in_cluster)
 
             cluster_size_lists.append(cluster_size_list)
             emb_idxs_list_list.append(emb_idxs_list)

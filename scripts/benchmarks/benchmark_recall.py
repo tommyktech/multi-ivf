@@ -1,7 +1,6 @@
-import os, argparse, json
+import os, argparse, json, faiss
 from pathlib import Path
 import numpy as np
-import faiss
 
 ##########################################
 # Helper functions
@@ -19,113 +18,137 @@ def resolve_file_path(path: str, should_exist: bool = None) -> str:
     return str(p)
 
 
-##########################################
+print(f"""
+####################################################################################
 # Parse arguments
-##########################################
+####################################################################################""")
 ap = argparse.ArgumentParser()
 ap.add_argument("--input", required=True, metavar="INPUT_FILE_PATH", help="Path to the input .npy or .npz file.")
-ap.add_argument("--output", required=False, metavar="OUTPUT_FILE_PATH", default="firevector_model/centroids_dict.npz", help="Path where the trained ANN model (.npz) will be saved.")
+ap.add_argument("--output", required=False, metavar="OUTPUT_FILE_PATH", default=None, help="Path where the trained ANN model (.npz) will be saved.")
 ap.add_argument("--train_size", required=True, type=int, default=None, metavar="TRAIN_SIZE", help="Number of records to use for training the ANN model.")
 ap.add_argument("--query_size", required=False, type=int, default=0, metavar="QUERY_SIZE", help="Number of records to use to evaluate/benchmark the ANN model.")
+ap.add_argument("--use_mean_centering", required=False, metavar="USE_MEAN_CENTERING", type=str.lower, default="true", choices=["0", "true", "false", "0", "1", "y", "yes", None], help="Whether to use mean centering method.")
 ap.add_argument("--n_ensembles", required=False, type=int, default=1, metavar="NUMBER_OF_ENSEMBLES", help="Number of ensembles.")
 ap.add_argument("--n_clusters", required=False, type=int, default=1, metavar="NUMBER_OF_CLUSTERS", help="Number of clusters (k) for ANN model (k-means centroid) computation.")
+ap.add_argument("--n_assignments", required=False, type=int, default=100, metavar="NUMBER_OF_ASSIGNMENTS", help="Number of assigning clusters when indexing a vector.")
 ap.add_argument("--n_probe", required=False, type=int, default=5, metavar="NUMBER_OF_PROBE", help="Number of clusters to probe during a search query.")
+ap.add_argument("--ensemble_selection_method", required=False, type=str, default=None, metavar="ENSEMBLE_SELECTION_METHOD", help="Selection method within the ensemble")
+ap.add_argument("--force_rebuild", required=False, metavar="FORCE_REBUILD", type=str.lower, default="false", choices=["0", "true", "false", "0", "1", "y", "yes", None], help="Whether to rebuild model.")
+ap.add_argument("--use_local_lib", required=False, metavar="USE_LOCAL_LIB", type=str.lower, default="false", choices=["0", "true", "false", "0", "1", "y", "yes", None], help="Whether to rebuild model.")
+ap.add_argument("--gpu_id", required=False, type=int, default=None, metavar="GPU_ID", help="GPU parameter for faiss.")
 
 args = ap.parse_args()
 input_path = args.input
 output = args.output
 train_size = args.train_size
 query_size = args.query_size
+use_mean_centering = True if args.use_mean_centering.lower() in ["1", "true", "y", "yes"] else False
 test_size = 0
 n_ensembles = args.n_ensembles
 n_clusters = args.n_clusters
+n_assignments = args.n_assignments
 n_probe = args.n_probe
-force_rebuild = False
-use_mean_centering = True
-n_assignments = 100
+ensemble_selection_method = args.ensemble_selection_method
+force_rebuild = True if args.force_rebuild.lower() in ["1", "true", "y", "yes"] else False
+use_local_lib = True if args.use_local_lib.lower() in ["1", "true", "y", "yes"] else False
+gpu_id = args.gpu_id
 assign_margin = 0.1
 recall_k = 100
-kmeans_max_iter = 20
-kmeans_base_seed = 112
-kmeans_batch_size = 10000
-kmeans_sample_size = 100
-kmeans_n_init = 2
-kmeans_n_refine_iters = 2
+max_iter = 20
+random_state = 112
+flat_search_batch_size = 10000
+max_points_per_centroid = 100
+n_init = 2
+n_iters_finish = 0
 
 if query_size <= 0:
     raise Exception("query_size must be larger than 0. ")
 
-# gpu parameter for faiss
-gpu_id = 0 if faiss.get_num_gpus() > 0 else None
+if gpu_id is not None and faiss.get_num_gpus() == 0:
+    raise ValueError("GPU is not available.")
 
 print("Input Arguments:")
 print(f"input={input_path}")
 print(f"output={output}")
 print(f"train_size={train_size}")
 print(f"query_size={query_size}")
+print(f"n_ensembles={n_ensembles}")
+print(f"use_mean_centering={use_mean_centering}")
 print(f"n_clusters={n_clusters}")
 print(f"assign_margin={assign_margin}")
 print(f"n_assignments={n_assignments}")
 print(f"n_probe={n_probe}")
+print(f"ensemble_selection_method={ensemble_selection_method}")
+print(f"force_rebuild={force_rebuild}")
+print(f"use_local_lib={use_local_lib}")
 print(f"gpu_id={gpu_id}")
 print("")
 
-##########################################
-# Check parameters
-##########################################
+
 input_path = resolve_file_path(input_path, should_exist=True)
-output_path = resolve_file_path(output)
 print("input_path:", input_path)
-print("output_path:", output_path)
+if output:
+    output_path = resolve_file_path(output)
+    print("output_path:", output_path)
 
-print("")
 
+print(f"""
 ####################################################################################
 # preparing data
-####################################################################################
+####################################################################################""")
 from recall_evaluator import DatasetLoader
 print("Loading dataset...")
-dataLoader = DatasetLoader(train_size=train_size, test_size=test_size, query_size=query_size, use_memmap=True, chunk_size=100000, normalize_l2=True, random_state=kmeans_base_seed)
+dataLoader = DatasetLoader(train_size=train_size, test_size=test_size, query_size=query_size, use_memmap=True, chunk_size=100000, normalize_l2=True, random_state=random_state)
 X_train, _, X_query = dataLoader.load(input_path)
 
 print("X_train.shape:", X_train.shape)
 print("X_query.shape:", X_query.shape)
-print("")
 
+print(f"""
 #####################################################################################
 # training k-means
-#####################################################################################
-from multi_ivf import MultiIVF
+#####################################################################################""")
+if use_local_lib:
+    import sys
+    sys.path.insert(0, "../../src")
+    from multi_ivf.multi_ivf import MultiIVF
+else:
+    from multi_ivf import MultiIVF
 
 mivf_params = {
     "n_clusters": n_clusters,
     "n_ensembles": n_ensembles,
-    "max_iter": kmeans_max_iter,
-    "max_points_per_centroid": kmeans_sample_size,
-    "flat_search_batch_size": kmeans_batch_size,
-    "n_init": kmeans_n_init,
-    "n_iters_finish": kmeans_n_refine_iters,
+    "max_iter": max_iter,
+    "max_points_per_centroid": max_points_per_centroid,
+    "flat_search_batch_size": flat_search_batch_size,
+    "n_init": n_init,
+    "n_iters_finish": n_iters_finish,
     "use_mean_centering": use_mean_centering,
     "gpu_id": gpu_id,
-    "random_state": kmeans_base_seed,
+    "random_state": random_state,
     "tqdm_disable": False,
 }
 
-if force_rebuild or not os.path.exists(output_path):
+
+if force_rebuild or output is None or not os.path.exists(output_path):
     # Build model
     mivf = MultiIVF(**mivf_params)
 
-    print("Training params:")
-    print(f"n_clusters:{n_clusters}\nkmeans_n_seeds:{n_ensembles}\nkmeans_max_iter:{kmeans_max_iter}\nkmeans_base_seed:{kmeans_base_seed}\nbatch_size:{kmeans_batch_size}\n")
-    print("Calculating ANN model with multiple random seeds...")
-    
+    print(f"""Calculating ANN model. Training params:
+- n_clusters:{n_clusters}
+- n_ensembles:{n_ensembles}
+- max_iter:{max_iter}
+- random_state:{random_state}
+- flat_search_batch_size:{flat_search_batch_size}
+""")
+
     mivf.train(X_train)
 
-    print("Saving model data...")
-    mivf.save(output_path)
-    print(f"Saved model data to {output_path}")
+    if output:
+        mivf.save(output_path)
+        print(f"Saved model data to {output_path}")
 else:
-    print("Load existing ANN model file")
+    print("Load existing ANN model file. ")
     mivf = MultiIVF.load(output_path)
 
     # Load n_clusters from centroid data
@@ -134,27 +157,34 @@ else:
 
     # Check if parameters match. 
     for key, value in mivf_params.items():
+        if key in ["gpu_id", "tqdm_disable"]:
+            continue
         if getattr(mivf, key) != value:
             raise ValueError(f"{key}: expected={value}, actual={getattr(mivf, key)}")
 
-print("")
+print(f"""
+#######################################################################
+# Calculating recall
+# 
+# Parameters: 
+# - n_assignments:{n_assignments}
+# - assign_margin={assign_margin}
+# - n_probe={n_probe}
+#######################################################################""")
 
-####################################################################################
-# Recall evaluation
-####################################################################################
-print("Calculating recall")
-print(f"\nParameters used for recall:\nn_assignments={n_assignments}\nassign_margin={assign_margin}\nn_probe={n_probe}\n")
 # Assign cluster labels to data
 cluster_assignments = mivf.assign(X_train, n_assignments=n_assignments, assign_margin=assign_margin)
 
 # Calculate recall values
 from recall_evaluator import RecallEvaluator
 recall_eval = RecallEvaluator(mivf, n_clusters=n_clusters)
-recalls, cluster_size_lists, candidate_size_list = recall_eval.calc_recalls(X_train, X_query, cluster_assignments, n_probe, recall_at_k=recall_k)
+recalls, cluster_size_lists, candidate_size_list = recall_eval.calc_recalls(X_train, X_query, cluster_assignments, n_probe, ensemble_selection_method=ensemble_selection_method, recall_at_k=recall_k)
 
-####################################################################################
+
+print(f"""
+#######################################################################
 # Summarize and save results
-####################################################################################
+#######################################################################""")
 def summarize_final_results(recalls):
     mean_recall_at_10, mean_recall_at_50, mean_recall_at_100 = list(np.mean(recalls, axis=0))
     flat = [x for sub in cluster_size_lists for x in sub]
