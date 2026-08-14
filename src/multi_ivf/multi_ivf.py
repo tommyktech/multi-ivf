@@ -161,7 +161,7 @@ class MultiIVF:
             raise ValueError("X must not be an empty data. ")
 
         if init_centroids is not None:
-            centroids = self._faiss_kmeans_with_init(X, init_centroids, n_iter=max_iter, max_points_per_centroid=max_points_per_centroid, seed=seed)
+            centroids = self._faiss_kmeans_with_init(X, init_centroids, dim=D, n_iter=max_iter, max_points_per_centroid=max_points_per_centroid, seed=seed)
             centroids = np.asarray(centroids, dtype=np.float32, order="C")
         else:
             kmeans = faiss.Kmeans(
@@ -184,40 +184,25 @@ class MultiIVF:
         self,
         X_train,
         init_centroids,
-        n_iter=20,
-        max_points_per_centroid=100,
-        seed=42,
+        dim,
+        n_iter,
+        nredo,
+        max_points_per_centroid,
+        seed,
     ):
-        X_train = np.ascontiguousarray(X_train, dtype=np.float32)
-        init_centroids = np.ascontiguousarray(
-            init_centroids,
-            dtype=np.float32,
-        )
-
-        d = X_train.shape[1]
-        n_clusters = init_centroids.shape[0]
-
-        clustering = faiss.Clustering(d, n_clusters)
-
+        clustering = faiss.Clustering(dim, self.n_clusters)
         clustering.niter = n_iter
-        clustering.nredo = 1
+        clustering.nredo = nredo
         clustering.spherical = True
         clustering.max_points_per_centroid = max_points_per_centroid
         clustering.seed = seed
 
-        faiss.copy_array_to_vector(
-            init_centroids.ravel(),
-            clustering.centroids
-        )
+        faiss.copy_array_to_vector(init_centroids.ravel(), clustering.centroids)
 
-        index = faiss.IndexFlatL2(d)
-
+        index = self._generate_faiss_flat_index(dim=dim)
         clustering.train(X_train, index)
 
-        centroids = faiss.vector_to_array(
-            clustering.centroids
-        ).reshape(n_clusters, d)
-
+        centroids = faiss.vector_to_array(clustering.centroids).reshape(self.n_clusters, dim)
         return centroids
 
 
