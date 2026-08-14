@@ -17,7 +17,7 @@ class DatasetLoader:
             use_memmap=False, 
             chunk_size=10000, 
             normalize_l2=True, 
-            random_state=None
+            random_state=None,
         ):
         self.train_size = train_size
         self.test_size  = test_size
@@ -123,12 +123,22 @@ class RecallEvaluator:
     Evaluates MultiIVF search performance using recall metrics.
     Supports ground truth generation, approximate search evaluation, and candidate size measurement.
     """
-    def __init__(self, multi_ivf, n_clusters:int):
+    def __init__(self, multi_ivf, n_clusters:int, gpu_id=None):
         self.mivf = multi_ivf
         self.n_clusters = n_clusters
+        self.gpu_id = gpu_id
+        self.gpu_res = None
 
     def _get_faiss_flat_index(self, dimension):
-        return faiss.IndexFlatIP(dimension)
+        if self.gpu_id is None:
+            return faiss.IndexFlatIP(dimension)
+
+        if self.gpu_res is None:
+            self.gpu_res = faiss.StandardGpuResources()
+
+        cpu_index = faiss.IndexFlatIP(dimension)
+        index = faiss.index_cpu_to_gpu(self.gpu_res, 0, cpu_index)
+        return index
 
     def _generate_ground_truth(
         self,

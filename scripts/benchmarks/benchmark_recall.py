@@ -149,7 +149,7 @@ if force_rebuild or output is None or not os.path.exists(output_path):
         print(f"Saved model data to {output_path}")
 else:
     print("Load existing ANN model file. ")
-    mivf = MultiIVF.load(output_path)
+    mivf = MultiIVF.load(output_path, gpu_id=gpu_id)
 
     # Load n_clusters from centroid data
     n_clusters = next(iter(mivf.cluster_centers_.items()))[1].shape[0]
@@ -177,7 +177,7 @@ cluster_assignments = mivf.assign(X_train, n_assignments=n_assignments, assign_m
 
 # Calculate recall values
 from recall_evaluator import RecallEvaluator
-recall_eval = RecallEvaluator(mivf, n_clusters=n_clusters)
+recall_eval = RecallEvaluator(mivf, n_clusters=n_clusters, gpu_id=gpu_id)
 recalls, cluster_size_lists, candidate_size_list = recall_eval.calc_recalls(X_train, X_query, cluster_assignments, n_probe, ensemble_selection_method=ensemble_selection_method, recall_at_k=recall_k)
 
 

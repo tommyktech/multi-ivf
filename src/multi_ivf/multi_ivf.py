@@ -1,6 +1,7 @@
 import numpy as np
 import random, faiss, joblib
 from tqdm import tqdm
+from typing import Literal
 
 class MultiIVF:
     """
@@ -64,7 +65,8 @@ class MultiIVF:
         self.gpu_id = gpu_id
         self.random_state = random_state
         self.tqdm_disable = tqdm_disable
-        
+        self.gpu_res = None
+
 
     ########################################
     # save and load
@@ -74,9 +76,19 @@ class MultiIVF:
 
 
     @classmethod
-    def load(cls, path:str):
-        return joblib.load(path)
+    def load(cls, path:str, gpu_id=None):
+        obj = joblib.load(path)
+        if gpu_id is not None:
+            obj.gpu_id = gpu_id
+        return obj
 
+
+    def __getstate__(self):
+        # Exclude environmet dependent variables from joblib dump
+        state = self.__dict__.copy()
+        state.pop("gpu_id", None)
+        state.pop("gpu_res", None)
+        return state
 
     def __setstate__(self, state: dict):
         attr_renames = {
@@ -91,6 +103,8 @@ class MultiIVF:
 
         self.__dict__.update(state)
 
+        self.gpu_id = None
+        self.gpu_res = None
 
     ########################################
     # helpers
@@ -104,11 +118,13 @@ class MultiIVF:
 
     def _generate_faiss_flat_index(self, dim):
         if self.gpu_id is None:
-            index = faiss.IndexFlatIP(dim)
-        else:
-            res = faiss.StandardGpuResources()
-            cpu_index = faiss.IndexFlatIP(dim)
-            index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+            return faiss.IndexFlatIP(dim)
+
+        if self.gpu_res is None:
+            self.gpu_res = faiss.StandardGpuResources()
+
+        cpu_index = faiss.IndexFlatIP(dim)
+        index = faiss.index_cpu_to_gpu(self.gpu_res, 0, cpu_index)
         return index
     
 
@@ -530,7 +546,6 @@ class MultiIVF:
         return labels, similarities
 
     
-    from typing import Literal
     def search(self, query, n_probe: int = 1, ensemble_selection_method: Literal[
             "top1",
             "mean",
