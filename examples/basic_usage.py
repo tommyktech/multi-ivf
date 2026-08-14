@@ -30,7 +30,6 @@ def print_side_by_side(left_title, left_lines, right_title, right_lines):
 #############################
 import pandas as pd
 import numpy as np
-import os
 df = pd.read_parquet("./data/wiki40b_en_embeddings_30000.parquet")
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
@@ -50,26 +49,22 @@ X_query  = np.stack(df_query.embedding.values)
 # Train multi ivf model
 #############################
 output_path = "output/multi_ivf.joblib"
-if os.path.exists(output_path):
-    # load mIVF if exists
-    print("Loading existing MultiIVF object...")
-    mivf = MultiIVF.load(output_path)
-else:
-    # train mIVF
-    print("Training MultiIVF...")
-    n_ensembles = 10
-    N = X_train.shape[0]
-    n_clusters = int(N / 100)
+# train mIVF
+print("Training MultiIVF...")
+n_ensembles = 10
+N = X_train.shape[0]
+n_clusters = int(N / 100)
 
-    mivf = MultiIVF(
-        n_clusters=n_clusters, 
-        n_ensembles=n_ensembles, 
-        use_mean_centering=True,
-        tqdm_disable=False
-        )
+mivf = MultiIVF(
+    n_clusters=n_clusters, 
+    n_ensembles=n_ensembles, 
+    use_mean_centering=True,
+    tqdm_disable=False,
+    gpu_id=0
+    )
 
-    mivf.train(X_train)
-    mivf.save(output_path)
+mivf.train(X_train)
+mivf.save(output_path)
 
 #############################
 # Assign mIVF labels
@@ -101,7 +96,7 @@ for i, query in enumerate(X_query):
     gt_top_k_texts = [row["text"] for _, row in df_train.iloc[gt_idxs[0]].iterrows()]
 
     # ANN search
-    q_ensemble, q_labels = mivf.search(query, n_probe=n_probe)
+    q_ensemble, q_labels = mivf.search(query, n_probe=n_probe, ensemble_selection_method="top1")
     candidate_idxs = set()
     for idx, assignment in enumerate(assignments):
         t_labels = assignment.get(q_ensemble)
