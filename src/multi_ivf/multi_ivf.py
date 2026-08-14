@@ -536,7 +536,7 @@ class MultiIVF:
             "mean",
             "weighted_mean",
             "full_weighted_mean",
-        ] | None = None,
+        ] | None = "top1",
     ) -> tuple[int, list[int]] | list[tuple[int, list[int]]]:
         """
         Find the best-matching ensemble label for `query` and return the indices of its
