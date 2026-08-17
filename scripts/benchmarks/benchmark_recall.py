@@ -30,6 +30,7 @@ ap.add_argument("--query_size", required=False, type=int, default=0, metavar="QU
 ap.add_argument("--use_mean_centering", required=False, metavar="USE_MEAN_CENTERING", type=str.lower, default="true", choices=["0", "true", "false", "0", "1", "y", "n", "yes", "no", None], help="Whether to use mean centering method.")
 ap.add_argument("--n_ensembles", required=False, type=int, default=1, metavar="NUMBER_OF_ENSEMBLES", help="Number of ensembles.")
 ap.add_argument("--n_clusters", required=False, type=int, default=1, metavar="NUMBER_OF_CLUSTERS", help="Number of clusters (k) for ANN model (k-means centroid) computation.")
+ap.add_argument("--assign_margin", required=False, type=float, default=0.1, metavar="ASSIGN_MARGIN", help="Number of assigning clusters when indexing a vector.")
 ap.add_argument("--n_assignments", required=False, type=int, default=100, metavar="NUMBER_OF_ASSIGNMENTS", help="Number of assigning clusters when indexing a vector.")
 ap.add_argument("--n_probe", required=False, type=int, default=5, metavar="NUMBER_OF_PROBE", help="Number of clusters to probe during a search query.")
 ap.add_argument("--ensemble_selection_method", required=False, type=str, default=None, metavar="ENSEMBLE_SELECTION_METHOD", help="Selection method within the ensemble")
@@ -52,7 +53,7 @@ ensemble_selection_method = args.ensemble_selection_method
 force_rebuild = True if args.force_rebuild.lower() in ["1", "true", "y", "yes"] else False
 use_local_lib = True if args.use_local_lib.lower() in ["1", "true", "y", "yes"] else False
 gpu_id = args.gpu_id
-assign_margin = 0.1
+assign_margin = args.assign_margin
 recall_k = 100
 max_iter = 20
 random_state = 112

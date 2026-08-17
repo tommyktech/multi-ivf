@@ -115,7 +115,7 @@ class DatasetLoader:
         mmap.flush()
         del mmap
 
-        return np.load(output_path, mmap_mode="r")
+        return np.load(output_path, mmap_mode="r+")
 
 
 class RecallEvaluator:
@@ -129,6 +129,7 @@ class RecallEvaluator:
         self.gpu_id = gpu_id
         self.gpu_res = None
 
+
     def _get_faiss_flat_index(self, dimension):
         if self.gpu_id is None:
             return faiss.IndexFlatIP(dimension)
@@ -139,6 +140,7 @@ class RecallEvaluator:
         cpu_index = faiss.IndexFlatIP(dimension)
         index = faiss.index_cpu_to_gpu(self.gpu_res, 0, cpu_index)
         return index
+    
 
     def _generate_ground_truth(
         self,
@@ -186,6 +188,7 @@ class RecallEvaluator:
                 best_I = np.take_along_axis(merged_I, order, axis=1)
 
         return best_I
+
     
     from typing import Literal
     def calc_recalls(
@@ -203,7 +206,7 @@ class RecallEvaluator:
         ) -> tuple[list, list, list]:
         if n_probe > self.n_clusters:
             raise ValueError("n_probe must be smaller than self.n_clusters. self.n_clusters:", self.n_clusters)
-        
+
         search_size_list   = []
         cluster_size_lists = []
         emb_idxs_list_list = []
@@ -228,21 +231,12 @@ class RecallEvaluator:
 
             # Search for cluster labels using the MultiIVF index
             results = self.mivf.search(query, n_probe, ensemble_selection_method=ensemble_selection_method)
-            # Collect candidate embedding indices and cluster size information
-            if ensemble_selection_method == "full_weighted_mean":
-                candidate_idx_set = set()
-                for nearest_ensemble_label, nearest_cluster_labels in results:
-                    for cluster_label in nearest_cluster_labels:
-                        corpus_idxs_in_cluster = labels_to_idxs_dict[nearest_ensemble_label][cluster_label]
-                        if len(corpus_idxs_in_cluster) == 0:
-                            continue
+            if ensemble_selection_method != "full_weighted_mean":
+                results = [results]
 
-                        cluster_size_list.append(len(corpus_idxs_in_cluster))
-                        emb_idxs_list.append(corpus_idxs_in_cluster)
-                        candidate_idx_set.update(corpus_idxs_in_cluster)
-            else:
-                nearest_ensemble_label, nearest_cluster_labels = results
-                candidate_idx_set = set()
+            # Collect candidate embedding indices and cluster size information
+            candidate_idx_set = set()
+            for nearest_ensemble_label, nearest_cluster_labels in results:
                 for cluster_label in nearest_cluster_labels:
                     corpus_idxs_in_cluster = labels_to_idxs_dict[nearest_ensemble_label][cluster_label]
                     if len(corpus_idxs_in_cluster) == 0:
@@ -261,11 +255,13 @@ class RecallEvaluator:
                 search_size_list.append(len(candidate_idxs))
 
                 sub_vectors = np.ascontiguousarray(X[candidate_idxs], dtype=np.float32)
+                query_vec = query.reshape(1, -1).astype(np.float32).copy()
+                
                 sub_index = self._get_faiss_flat_index(dimension=X.shape[1])
                 sub_index.add(sub_vectors)
 
                 k = min(recall_at_k, len(candidate_idxs))
-                _, local_idx = sub_index.search(query.reshape(1, -1).astype(np.float32), k)
+                _, local_idx = sub_index.search(query_vec, k)
                 top_k_vector_idx = candidate_idxs[local_idx[0]].tolist()
             else:
                 search_size_list.append(0)
