@@ -19,7 +19,7 @@ This library is particularly well suited for systems that perform exact rerankin
 - **Dataset size:** 1,000,000+ vectors (Train vectors: 999496, Query vectors: 1000)
 - **Source Dataset:** [wiki40b (English)](https://huggingface.co/datasets/google/wiki40b)
 - **Embedding model:** [granite-embedding-97m-multilingual-r2](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2)
-- **Dataset Download:** Available from [GitHub Releases](https://github.com/tommyktech/multi-ivf/releases/tag/benchmark-0.1.0)
+- **Dataset Download:** Available from [GitHub Releases](https://github.com/tommyktech/multi-ivf/releases/tag/benchmark-0.1.1)
 
 ### Evaluation
 
@@ -50,7 +50,7 @@ A smaller candidate size means fewer vectors need to be re-ranked, resulting in 
 ## Installation
 
 ```bash
-pip install https://github.com/tommyktech/multi-ivf/releases/download/0.1.0/multi_ivf-0.1.0-py3-none-any.whl
+pip install https://github.com/tommyktech/multi-ivf/releases/download/0.1.1/multi_ivf-0.1.1-py3-none-any.whl
 ```
 
 > **Note:** PyPI support is coming soon. Please use the GitHub Release package for now.
