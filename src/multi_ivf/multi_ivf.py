@@ -50,8 +50,13 @@ class MultiIVF:
             max_seed:int=99999, 
             gpu_id:int=None, 
             random_state:int=432, 
-            tqdm_disable:bool=True
+            tqdm_disable:bool=True,
+            copy:bool=True,
+            normalize:bool=True,
         ):
+        if copy == False and use_mean_centering == True:
+            raise ValueError("copy=False cannot be used together with use_mean_centering=True because mean centering modifies the input data in-place and irreversibly. Please set use_mean_centering=False and provide data that has already been mean-centered.")
+
         self.n_clusters = n_clusters
         self.n_ensembles = n_ensembles
         self.max_iter = max_iter
@@ -65,7 +70,12 @@ class MultiIVF:
         self.gpu_id = gpu_id
         self.random_state = random_state
         self.tqdm_disable = tqdm_disable
-        self.gpu_res = None
+        self.copy = copy
+        self.normalize = normalize
+
+        self.cluster_centers_ = None
+        self.gpu_res_ = None
+        self.mean_centers_ = None
 
 
     ########################################
@@ -90,6 +100,7 @@ class MultiIVF:
         state.pop("gpu_res", None)
         return state
 
+
     def __setstate__(self, state: dict):
         attr_renames = {
             "mean": "mean_centers_",
@@ -104,7 +115,8 @@ class MultiIVF:
         self.__dict__.update(state)
 
         self.gpu_id = None
-        self.gpu_res = None
+        self.gpu_res_ = None
+
 
     ########################################
     # helpers
@@ -120,28 +132,56 @@ class MultiIVF:
         if self.gpu_id is None:
             return faiss.IndexFlatIP(dim)
 
-        if self.gpu_res is None:
-            self.gpu_res = faiss.StandardGpuResources()
+        if self.gpu_res_ is None:
+            self.gpu_res_ = faiss.StandardGpuResources()
 
         cpu_index = faiss.IndexFlatIP(dim)
-        index = faiss.index_cpu_to_gpu(self.gpu_res, 0, cpu_index)
+        index = faiss.index_cpu_to_gpu(self.gpu_res_, 0, cpu_index)
         return index
     
 
-    def _ensure_faiss_array(self, x: np.ndarray) -> np.ndarray:
-        if (
-            not isinstance(x, np.ndarray)
-            or x.dtype != np.float32
-            or not x.flags.c_contiguous
-        ):
-            raise ValueError("X must be an instance of ndarray, and of dtype float32, and contiguous.")
+    def _validate_input_array(self, X: np.ndarray) -> np.ndarray:
+        if not isinstance(X, np.ndarray):
+            raise ValueError("X must be an instance of ndarray.")
+
+        if self.copy:
+            return np.ascontiguousarray(X, dtype=np.float32)
+
+        if X.dtype != np.float32 or not X.flags.c_contiguous:
+            raise ValueError("X must be of dtype float32 and contiguous.")
+
+        return X
+
     
+    def _exec_mean_centering(self, X: np.ndarray) -> np.ndarray:
+        if self.mean_centers_ is None:
+            return X
+        
+        if self.copy:
+            X = X - self.mean_centers_
+        else:
+            X -= self.mean_centers_
+
+        X = self._exec_normalize(X)
+
+        return X
+    
+
+    def _exec_normalize(self, X: np.ndarray) -> np.ndarray:
+        if self.copy:
+            X = X.copy()
+
+        faiss.normalize_L2(X)
+
+        return X
+
 
     def is_trained(self):
         if self.cluster_centers_ is None:
             return False
+        
         return True
-
+        
 
     ########################################
     # kmeans trainer functions
@@ -160,49 +200,20 @@ class MultiIVF:
         if N == 0:
             raise ValueError("X must not be an empty data. ")
 
-        if init_centroids is not None:
-            centroids = self._faiss_kmeans_with_init(X, init_centroids, dim=D, n_iter=max_iter, max_points_per_centroid=max_points_per_centroid, seed=seed)
-            centroids = np.asarray(centroids, dtype=np.float32, order="C")
-        else:
-            kmeans = faiss.Kmeans(
-                D,
-                n_clusters,
-                niter=max_iter,
-                nredo=nredo,
-                spherical=True,
-                verbose=False,
-                seed=seed,
-                max_points_per_centroid=max_points_per_centroid,
-                gpu=False if self.gpu_id is None else True,
-            )
-            kmeans.train(X)
-            centroids = np.asarray(kmeans.centroids, dtype=np.float32, order="C")
-        return centroids
+        kmeans = faiss.Kmeans(
+            D,
+            n_clusters,
+            niter=max_iter,
+            nredo=nredo if init_centroids is None else 1,
+            spherical=True,
+            verbose=False,
+            seed=seed,
+            max_points_per_centroid=max_points_per_centroid,
+            gpu=False if self.gpu_id is None else True,
+        )
+        kmeans.train(X, init_centroids=init_centroids)
+        centroids = np.asarray(kmeans.centroids, dtype=np.float32, order="C")
 
-
-    def _faiss_kmeans_with_init(
-        self,
-        X_train,
-        init_centroids,
-        dim,
-        n_iter,
-        nredo,
-        max_points_per_centroid,
-        seed,
-    ):
-        clustering = faiss.Clustering(dim, self.n_clusters)
-        clustering.niter = n_iter
-        clustering.nredo = nredo
-        clustering.spherical = True
-        clustering.max_points_per_centroid = max_points_per_centroid
-        clustering.seed = seed
-
-        faiss.copy_array_to_vector(init_centroids.ravel(), clustering.centroids)
-
-        index = self._generate_faiss_flat_index(dim=dim)
-        clustering.train(X_train, index)
-
-        centroids = faiss.vector_to_array(clustering.centroids).reshape(self.n_clusters, dim)
         return centroids
 
 
@@ -228,10 +239,11 @@ class MultiIVF:
         else:
             cent = np.asarray(centroids, dtype=np.float32, order="C")
 
-        faiss.normalize_L2(cent)
+        if self.normalize:
+            faiss.normalize_L2(cent)
+
         K, D = cent.shape
         index = self._generate_faiss_flat_index(D)
-
 
         for _ in tqdm(range(n_iters), desc=f"iter 0/{n_iters}", disable=self.tqdm_disable):
             sums = np.zeros((K, D), dtype=np.float64)
@@ -240,13 +252,13 @@ class MultiIVF:
             index.add(cent)
 
             all_labels = []
-            for _, x_raw in self._iter_batches(X, batch_size):
-                _, labels = index.search(x_raw, 1)
+            for _, X_chunk in self._iter_batches(X, batch_size):
+                _, labels = index.search(X_chunk, 1)
                 labels = labels.reshape(-1)
                 all_labels.append(labels)
 
                 np.add.at(counts, labels, 1)
-                np.add.at(sums, labels, x_raw.astype(np.float64))
+                np.add.at(sums, labels, X_chunk.astype(np.float64))
 
             new_cent = cent.copy()
             nonzero = counts > 0
@@ -258,7 +270,8 @@ class MultiIVF:
                 repl = rng.integers(0, cent.shape[0], size=m)
                 new_cent[~nonzero] = cent[repl]
 
-            faiss.normalize_L2(new_cent)
+            if self.normalize:
+                faiss.normalize_L2(new_cent)
 
             shift = np.max(np.linalg.norm(cent - new_cent, axis=1))
             cent = new_cent
@@ -269,13 +282,15 @@ class MultiIVF:
         return cent, all_labels
 
 
-    def train(self, X, all_init_centroids=None):
-        self._ensure_faiss_array(X)
+    def train(self, X, init_centroids_list:list=None):
+        X = self._validate_input_array(X)
+
+        if self.normalize:
+            X = self._exec_normalize(X)
 
         if self.use_mean_centering:
             self.mean_centers_ = X.mean(axis=0).astype(np.float32)
-            X = X - self.mean_centers_
-            faiss.normalize_L2(X)
+            X = self._exec_mean_centering(X)
 
         cluster_centers_ = {}
         base_rng = np.random.RandomState(self.random_state)
@@ -285,8 +300,9 @@ class MultiIVF:
             np.random.seed(ensemble_seed)
 
             init_centroids = None
-            if all_init_centroids is not None:
-                init_centroids = all_init_centroids[len(cluster_centers_)]
+            if init_centroids_list is not None:
+                centroids_idx = min(len(cluster_centers_), len(init_centroids_list) - 1)
+                init_centroids = init_centroids_list[centroids_idx]
 
             centroids = self._faiss_kmeans(
                 X=X,
@@ -310,6 +326,7 @@ class MultiIVF:
                 )
 
             cluster_centers_[ensemble_seed] = centroids
+
         self.cluster_centers_ = cluster_centers_
 
 
@@ -331,16 +348,9 @@ class MultiIVF:
             # Limit the number of labels to n_assignments
             search_topk = n_assignments
 
-        for i in range(0, N, self.flat_search_batch_size):
-            j = min(i + self.flat_search_batch_size, N)
-
-            X_chunk = X[i:j]
-            if not X_chunk.flags.c_contiguous:
-                X_chunk = np.ascontiguousarray(X_chunk, dtype=np.float32)
-
+        for i, X_chunk in self._iter_batches(X, self.flat_search_batch_size):
             if self.use_mean_centering:
-                X_chunk = X_chunk - self.mean_centers_
-                faiss.normalize_L2(X_chunk)
+                X_chunk = self._exec_mean_centering(X_chunk)
 
             d_chunk, l_chunk = index.search(X_chunk, search_topk)
 
@@ -360,8 +370,10 @@ class MultiIVF:
         """
         Assign cluster labels for each embedding data
         """
-        self._ensure_faiss_array(X)
-        
+        X = self._validate_input_array(X)
+        if self.normalize:
+            X = self._exec_normalize(X)
+
         if n_assignments is not None and n_assignments > self.n_clusters:
             raise ValueError("n_assignments > n_clusters")
         if n_assignments is not None and n_assignments < 1:
@@ -384,61 +396,11 @@ class MultiIVF:
         return assignments
 
 
-    def _choose_top1_ensemble_label(
-        self,
-        query,
-    ) -> tuple[int, np.ndarray]:
-        """
-        Select the ensemble whose nearest centroid has the highest
-        similarity to the query.
-        """
-        best_sim = None
-        best_ensemble_label = None
-        best_sims = None
-
-        for ensemble_label, centroids in self.cluster_centers_.items():
-            sims = centroids.dot(query)
-
-            nearest_sim = sims.max()
-
-            if best_sim is None or nearest_sim > best_sim:
-                best_sim = nearest_sim
-                best_ensemble_label = ensemble_label
-                best_sims = sims
-
-        return best_ensemble_label, best_sims
-
-
-    def _choose_ensemble_by_mean_distance(self, query, n_probe) -> tuple[int, np.ndarray]:
+    def _choose_ensemble_by_mean_distance(self, query, n_probe, use_weighted_mean=False) -> tuple[int, np.ndarray]:
         """
         Select the seed (cluster group) whose top-`n_probe` centroids have the
         highest mean similarity to the query, and return that seed along with
         the similarity scores of all its centroids.
-        """
-        best_mean = None
-        best_ensemble_label = None
-        best_sims = None
-        for ensemble_label, centroids in self.cluster_centers_.items():
-            sims = centroids.dot(query)
-            k = min(n_probe, centroids.shape[0])
-            if k <= 0:
-                raise ValueError("n_probe must be larger than 0")
-            idx = np.argpartition(-sims, k - 1)[:k]
-            mean = float(sims[idx].mean())
-            if best_mean is None or mean > best_mean:
-                best_mean = mean
-                best_ensemble_label = ensemble_label
-                best_sims = sims
-
-        return best_ensemble_label, best_sims
-    
-    def _choose_ensemble_by_weighted_mean_distance(
-        self, query, n_probe
-    ) -> tuple[int, np.ndarray]:
-        """
-        Select the seed (cluster group) whose top-`n_probe` centroids have the
-        highest rank-weighted mean similarity to the query, and return that seed
-        along with the similarity scores of all its centroids.
         """
         best_score = None
         best_ensemble_label = None
@@ -446,32 +408,31 @@ class MultiIVF:
 
         for ensemble_label, centroids in self.cluster_centers_.items():
             sims = centroids.dot(query)
-
             k = min(n_probe, centroids.shape[0])
+
             if k <= 0:
                 raise ValueError("n_probe must be larger than 0")
-
+            
             idx = np.argpartition(-sims, k - 1)[:k]
-
-            # Sort TOP-k in descending order of similarity
             top_idx = idx[np.argsort(-sims[idx])]
             top_sims = sims[top_idx]
 
-            # rank = 1, 2, ..., k
-            weights = 1.0 / np.arange(1, k + 1)
-
-            weighted_mean = float(
-                np.average(top_sims, weights=weights)
-            )
-
-            if best_score is None or weighted_mean > best_score:
-                best_score = weighted_mean
+            if use_weighted_mean:
+                # rank = 1, 2, ..., k
+                weights = 1.0 / np.arange(1, k + 1)
+                score = float(np.average(top_sims, weights=weights))
+            else:
+                score = float(top_sims.mean())
+                
+            if best_score is None or score > best_score:
+                best_score = score
                 best_ensemble_label = ensemble_label
                 best_sims = sims
 
         return best_ensemble_label, best_sims
 
-    def _choose_ensembles_by_weighted_mean_distance(
+
+    def _choose_ensembles_by_mean_distance(
         self, query, n_probe
     ) -> tuple[list[tuple[int, int]], np.ndarray]:
         """
@@ -531,12 +492,14 @@ class MultiIVF:
         return labels, similarities
 
     
-    def search(self, query, n_probe: int = 1, ensemble_selection_method: Literal[
-            "top1",
-            "mean",
-            "weighted_mean",
-            "full_weighted_mean",
-        ] | None = "top1",
+    def search(self, 
+               query:np.ndarray,
+               n_probe: int = 1, 
+               ensemble_selection_method: Literal[
+                   "mean",
+                   "weighted_mean",
+                   "full_weighted_mean",
+               ] | None = "weighted_mean",
     ) -> tuple[int, list[int]] | list[tuple[int, list[int]]]:
         """
         Find the best-matching ensemble label for `query` and return the indices of its
@@ -545,25 +508,29 @@ class MultiIVF:
         Returns:
             A tuple of (ensemble label, set of centroid labels).
         """
+
+        if not (query.ndim == 1 or (query.ndim == 2 and query.shape[1] == 1)):
+            raise ValueError("")
+        
+        query = np.ascontiguousarray(query.reshape(1, -1), dtype=np.float32)
         n_probe = min(n_probe, self.n_clusters)
 
         if self.use_mean_centering:
-            query = np.ascontiguousarray(query.reshape(1, -1), dtype=np.float32)
-            query = query - self.mean_centers_
+            query = self._exec_mean_centering(query)
+        if self.normalize:
             faiss.normalize_L2(query)
-            query = query[0]
+
+        query = query.reshape(-1)
 
         if ensemble_selection_method == "full_weighted_mean":
-            best_ensemble_labels, _ = self._choose_ensembles_by_weighted_mean_distance(query, n_probe)
+            best_ensemble_labels, _ = self._choose_ensembles_by_mean_distance(query, n_probe)
             return best_ensemble_labels
+        elif ensemble_selection_method == "weighted_mean":
+            best_ensemble_labels, best_sims = self._choose_ensemble_by_mean_distance(query, n_probe, use_weighted_mean=True)
         elif ensemble_selection_method == "mean":
             best_ensemble_labels, best_sims = self._choose_ensemble_by_mean_distance(query, n_probe)
-        elif ensemble_selection_method == "weighted_mean":
-            best_ensemble_labels, best_sims = self._choose_ensemble_by_weighted_mean_distance(query, n_probe)
-        elif ensemble_selection_method == "top1":
-            best_ensemble_labels, best_sims = self._choose_top1_ensemble_label(query)
         else:
-            best_ensemble_labels, best_sims = self._choose_top1_ensemble_label(query)
+            best_ensemble_labels, best_sims = self._choose_ensemble_by_mean_distance(query, n_probe, use_weighted_mean=True)
 
         nearest_labels = np.argpartition(-best_sims, n_probe - 1)[:n_probe]
         return best_ensemble_labels, set(nearest_labels)
