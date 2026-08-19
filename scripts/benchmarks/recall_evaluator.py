@@ -118,36 +118,73 @@ class DatasetLoader:
         return np.load(output_path, mmap_mode="r+")
 
 
+from typing import Literal
 class RecallEvaluator:
     """
     Evaluates MultiIVF search performance using recall metrics.
     Supports ground truth generation, approximate search evaluation, and candidate size measurement.
     """
-    def __init__(self, multi_ivf, n_clusters:int, gpu_id=None):
+    def __init__(self, 
+                 X:np.ndarray, 
+                 X_query:np.ndarray, 
+                 multi_ivf, 
+                 assign_margin:float,
+                 n_assignments:int,
+                 recall_ks:list[int] = [10, 100],
+                 gpu_id:int=None,
+                 tqdm_disable:bool=True):
+        """
+        Args:
+            X: Corpus embeddings of shape (n_corpus, d).
+            X_query: Query embeddings of shape (n_query, d).
+            multi_ivf: MultiIVF index instance used for approximate search and cluster assignment.
+            assign_margin: Margin used when assigning corpus points to multiple clusters.
+            n_assignments: Number of cluster assignments per corpus point.
+            recall_ks: List of k values at which recall is measured.
+            gpu_id: GPU device id to use for FAISS indices, or None for CPU.
+            tqdm_disable: If True, disables progress bars.
+        """
+                
+        self.X = X 
+        self.X_query = X_query
         self.mivf = multi_ivf
-        self.n_clusters = n_clusters
+        self.recall_ks = recall_ks
         self.gpu_id = gpu_id
-        self.gpu_res = None
+        self.gpu_res_ = None
+
+        recall_k_max = max(self.recall_ks)
+        self.ground_truth_idxs_, _ = self.exact_knn_batched(X, X_query, recall_k_max, tqdm_disable=tqdm_disable)
+        assignments = self.mivf.assign(X, n_assignments=n_assignments, assign_margin=assign_margin)
+
+        print("Restructuring cluster_assignments data ...")
+        labels_to_idxs_dict = defaultdict(lambda: defaultdict(list))
+        for i, assignment in enumerate(assignments):
+            for ensemble_label, cluster_labels in assignment.items():
+                sub_dict = labels_to_idxs_dict[ensemble_label]
+                for label in cluster_labels:
+                    sub_dict[label].append(i)
+
+        self.labels_to_idxs_dict_ = labels_to_idxs_dict
 
 
     def _get_faiss_flat_index(self, dimension):
         if self.gpu_id is None:
             return faiss.IndexFlatIP(dimension)
 
-        if self.gpu_res is None:
-            self.gpu_res = faiss.StandardGpuResources()
+        if self.gpu_res_ is None:
+            self.gpu_res_ = faiss.StandardGpuResources()
 
         cpu_index = faiss.IndexFlatIP(dimension)
-        index = faiss.index_cpu_to_gpu(self.gpu_res, 0, cpu_index)
+        index = faiss.index_cpu_to_gpu(self.gpu_res_, 0, cpu_index)
         return index
     
 
-    def _generate_ground_truth(
+    def exact_knn_batched(
         self,
         X_corpus:np.ndarray,
         X_query:np.ndarray,
         topk:int,
-        query_batch_size:int=10000,
+        query_batch_size:int=1000,
         corpus_batch_size:int=100000,
         tqdm_disable:bool=False
     ) -> np.ndarray:
@@ -187,47 +224,52 @@ class RecallEvaluator:
                 best_D = np.take_along_axis(merged_D, order, axis=1)
                 best_I = np.take_along_axis(merged_I, order, axis=1)
 
-        return best_I
+        return best_I, best_D
 
     
-    from typing import Literal
-    def calc_recalls(
-            self, 
-            X:np.ndarray, 
-            X_query:np.ndarray, 
-            cluster_assignments:list, 
-            n_probe:int, 
-            ensemble_selection_method: Literal[
-                "top1",
-                "mean",
-                "weighted_mean",
-                "full_weighted_mean"],
-            recall_at_k:int=100
-        ) -> tuple[list, list, list]:
-        if n_probe > self.n_clusters:
-            raise ValueError("n_probe must be smaller than self.n_clusters. self.n_clusters:", self.n_clusters)
+    def evaluate(
+        self, 
+        n_probe:int, 
+        ensemble_selection_method: Literal[
+            "top1",
+            "mean",
+            "weighted_mean",
+            "full_weighted_mean"] = "weighted_mean",
+    ) -> tuple[list, list, list]:
+        
+        """
+        Evaluate recall@k and candidate set sizes over all queries for a given n_probe.
 
-        search_size_list   = []
-        cluster_size_lists = []
-        emb_idxs_list_list = []
+        Args:
+            n_probe: Number of clusters to probe per query in the MultiIVF search.
+            ensemble_selection_method: Strategy for selecting/combining cluster search results across all ensembles.
+
+        Returns:
+            A tuple of (final_results, all_cluster_size_list, candidate_size_list):
+                final_results: Dict mapping "recall_at_{k}" to the mean recall over all queries, for each k in self.recall_ks.
+                all_cluster_size_list: Per-query list of probed cluster sizes.
+                candidate_size_list: Per-query size of the deduplicated candidate index set.
+        """
+
+        if n_probe > self.mivf.n_clusters:
+            raise ValueError("n_probe must be smaller than n_clusters. n_clusters=", self.mivf.n_clusters)
+
+        recall_k_max = max(self.recall_ks)
+
+        candidate_size_list   = []
+        all_cluster_size_list = []
         recalls = []
 
-        # Reorganize assignments for efficient lookup
-        labels_to_idxs_dict = defaultdict(lambda: defaultdict(list))
-        for i, assignment in enumerate(cluster_assignments):
-            for ensemble_label, cluster_labels in assignment.items():
-                for label in cluster_labels:
-                    labels_to_idxs_dict[ensemble_label][label].append(i)
+        # Print progress header
+        headers = [f"{'iteration':>9}"]
+        headers.extend([f"{f'recall@{recall_k}':>{8+len(str(abs(recall_k)))}}" for recall_k in self.recall_ks])
+        headers.append(f"{'candidate_size':>14}")
+        header_str = " ".join(headers)
+        print(header_str)
+        print("-" * len(header_str))
 
-        # Calculate ground truth
-        ground_truth_idxs = self._generate_ground_truth(X, X_query, recall_at_k)
-
-        # Print progress
-        print(f"{'iteration':>9} {'recall@10':>10} {'recall@50':>10} {'recall@100':>11}")
-        print("-" * 45)
-
-        for i, query in enumerate(X_query):
-            cluster_size_list, emb_idxs_list = [], []
+        for i, query in enumerate(self.X_query):
+            cluster_size_list = []
 
             # Search for cluster labels using the MultiIVF index
             results = self.mivf.search(query, n_probe, ensemble_selection_method=ensemble_selection_method)
@@ -238,53 +280,128 @@ class RecallEvaluator:
             candidate_idx_set = set()
             for nearest_ensemble_label, nearest_cluster_labels in results:
                 for cluster_label in nearest_cluster_labels:
-                    corpus_idxs_in_cluster = labels_to_idxs_dict[nearest_ensemble_label][cluster_label]
+                    corpus_idxs_in_cluster = self.labels_to_idxs_dict_[nearest_ensemble_label][cluster_label]
                     if len(corpus_idxs_in_cluster) == 0:
                         continue
 
                     cluster_size_list.append(len(corpus_idxs_in_cluster))
-                    emb_idxs_list.append(corpus_idxs_in_cluster)
                     candidate_idx_set.update(corpus_idxs_in_cluster)
-
-            cluster_size_lists.append(cluster_size_list)
-            emb_idxs_list_list.append(emb_idxs_list)
+            all_cluster_size_list.append(cluster_size_list)
+            candidate_size_list.append(len(candidate_idx_set))
 
             if candidate_idx_set:
                 # Execute exact KNN and retrieve top-K indices
                 candidate_idxs = np.array(sorted(candidate_idx_set), dtype=np.int64)
-                search_size_list.append(len(candidate_idxs))
 
-                sub_vectors = np.ascontiguousarray(X[candidate_idxs], dtype=np.float32)
+                sub_vectors = np.ascontiguousarray(self.X[candidate_idxs], dtype=np.float32)
                 query_vec = query.reshape(1, -1).astype(np.float32).copy()
                 
-                sub_index = self._get_faiss_flat_index(dimension=X.shape[1])
+                sub_index = self._get_faiss_flat_index(dimension=self.X.shape[1])
                 sub_index.add(sub_vectors)
 
-                k = min(recall_at_k, len(candidate_idxs))
+                k = min(recall_k_max, len(candidate_idxs))
                 _, local_idx = sub_index.search(query_vec, k)
                 top_k_vector_idx = candidate_idxs[local_idx[0]].tolist()
             else:
-                search_size_list.append(0)
                 top_k_vector_idx = []
 
             # Calculate recall values
-            if len(ground_truth_idxs[i]) == 0:
-                recall_at_10  = 0.0
-                recall_at_50  = 0.0
-                recall_at_100 = 0.0
+            if len(self.ground_truth_idxs_[i]) == 0:
+                recalls.extend([0.0 for _ in self.recall_ks])
             else:
-                true_idx_set  = set(ground_truth_idxs[i][:10])
-                recall_at_10  = len(true_idx_set & set(top_k_vector_idx[:10])) / len(true_idx_set)
-                true_idx_set  = set(ground_truth_idxs[i][:50])
-                recall_at_50  = len(true_idx_set & set(top_k_vector_idx[:50])) / len(true_idx_set)
-                true_idx_set  = set(ground_truth_idxs[i])
-                recall_at_100 = len(true_idx_set & set(top_k_vector_idx)) / len(true_idx_set)
-
-            recalls.append([recall_at_10, recall_at_50, recall_at_100])
+                recall_result = []
+                for recall_k in self.recall_ks:
+                    true_idx_set  = set(self.ground_truth_idxs_[i][:recall_k])
+                    recall_at_k  = len(true_idx_set & set(top_k_vector_idx[:recall_k])) / len(true_idx_set)
+                    recall_result.append(recall_at_k)
+                recalls.append(recall_result)
 
             if i % 50 == 0:
                 # Print progress
-                avg_recall_at_10, avg_recall_at_50, avg_recall_at_100 = list(np.mean(recalls, axis=0))
-                print(f"{i:>9d} {avg_recall_at_10:>10.4f} {avg_recall_at_50:>10.4f} {avg_recall_at_100:>11.4f}")
+                progress = f"{i:>9d} "
+                for recall_k, avg_recall in zip(self.recall_ks, list(np.mean(recalls, axis=0))):
+                    progress += f"{avg_recall:>{8+len(str(abs(recall_k)))}.4f} "
+                print(progress + f"{np.mean(candidate_size_list):>14.0f}")
 
-        return recalls, cluster_size_lists, search_size_list
+        # Print final progress
+        progress = f"{i:>9d} "
+        for recall_k, avg_recall in zip(self.recall_ks, list(np.mean(recalls, axis=0))):
+            progress += f"{avg_recall:>{8+len(str(abs(recall_k)))}.4f} "
+        print(progress + f"{np.mean(candidate_size_list):>14.0f}")
+
+        final_results = {}
+        for recall_k, avg_recall in zip(self.recall_ks, list(np.mean(recalls, axis=0))):
+            final_results[f"recall_at_{recall_k}"] = avg_recall
+        return final_results, all_cluster_size_list, candidate_size_list
+
+    
+    def find_optimal_n_probe(
+        self, 
+        target_recall: float, 
+        target_recall_k: int,
+        min_probe: int = 5, 
+        max_probe: int = 30,
+        ensemble_selection_method: Literal[
+            "top1",
+            "mean",
+            "weighted_mean",
+            "full_weighted_mean"] = "weighted_mean",
+    ) -> tuple[int, float, int]:
+
+        """
+        Find the minimum n_probe that achieves target_recall using binary search.
+
+        Args:
+            target_recall: The recall value to achieve (e.g. 0.9 for 90%).
+            target_recall_k: The k value (from self.recall_ks) whose recall is checked against target_recall.
+            min_probe: Lower bound of the binary search range for n_probe.
+            max_probe: Upper bound of the binary search range for n_probe.
+            ensemble_selection_method: Strategy for selecting/combining cluster search results across all ensembles.
+
+        Returns:
+            A tuple of (best_n_probe, best_recall, best_mean_candidate_size):
+                best_n_probe: The smallest n_probe that achieved target_recall, or None if not found.
+                best_recall: The recall_at_{target_recall_k} value achieved at best_n_probe.
+                best_mean_candidate_size: The mean candidate set size at best_n_probe.
+        """
+
+        if target_recall_k not in self.recall_ks:
+            raise ValueError(f"target_recall_k ({target_recall_k}) does not exist in recall_ks ({self.recall_ks}) ")
+
+        low = min_probe
+        high = max_probe
+        
+        best_n_probe = None
+        best_recall = None
+        best_mean_candidate_size = None
+
+        while low <= high:
+            mid = (low + high) // 2
+            print("="*15)
+            print("n_probe:", mid)
+            print("="*15)
+
+            recalls, _, search_size_list = self.evaluate(
+                n_probe=mid, 
+                ensemble_selection_method=ensemble_selection_method, 
+            )
+            mean_candidate_size = np.mean(search_size_list)
+            target_recall_k_key = f"recall_at_{target_recall_k}"
+
+            if target_recall_k_key not in recalls:
+                raise ValueError(f"target_recall_k_key ({target_recall_k_key}) does not exist in recalls ({recalls}).")
+            
+            mean_recall_at_k = recalls[target_recall_k_key]
+
+            # Check whether the target recall has been achieved
+            if mean_recall_at_k >= target_recall:
+                # Save as the current best, then search the left side (smaller n_probe) to see if it's still achievable
+                best_n_probe = mid
+                best_recall = mean_recall_at_k
+                best_mean_candidate_size = mean_candidate_size
+                high = mid - 1
+            else:
+                # Target not met, search the right side (larger n_probe)
+                low = mid + 1
+
+        return best_n_probe, best_recall, best_mean_candidate_size
