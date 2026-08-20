@@ -21,6 +21,33 @@ This library is particularly well suited for systems that perform exact rerankin
 - **Embedding model:** [granite-embedding-97m-multilingual-r2](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2)
 - **Dataset Download:** Available from [GitHub Releases](https://github.com/tommyktech/multi-ivf/releases/tag/benchmark-0.1.1)
 
+### Reproducing the Results
+
+Benchmarks were run using [`run_recall_evaluation.py`](scripts/benchmarks/run_recall_evaluation.py). 
+
+Below is an example of the command used for the benchmark measurements:
+
+> Before running, download the dataset from the [GitHub Releases](https://github.com/tommyktech/multi-ivf/releases/download/benchmark-0.1.0/wiki40b_en_embeddings_1000000.npy) link above and place it at `scripts/data/wiki40b_en_embeddings_1000000.npy`.
+
+
+```bash
+python scripts/benchmarks/run_recall_evaluation.py \
+    --input scripts/data/wiki40b_en_embeddings_1000000.npy \
+    --train_size 999000 \
+    --query_size 1000 \
+    --use_mean_centering true \
+    --n_ensembles 10 \
+    --n_clusters 1000 \
+    --n_assignments 100 \
+    --ensemble_selection_method full_weighted_mean \
+    --target_recall 0.95 \
+    --recall_ks 1 10 100 \
+    --target_recall_k 10 \
+    --min_probe 5 \
+    --max_probe 30 \
+    --gpu_id 0 # if you don't have any GPU, remove this line
+```
+
 ### Evaluation
 
 We compare **Conventional IVF** (with Multi-Probe) and **Multi IVF** by measuring the number of candidate vectors required to achieve approximately the same recall.
@@ -99,7 +126,7 @@ assignments = mivf.assign(
 for query in X_query:
     q_ensemble, q_labels = mivf.search(query, n_probe=10) # Choose n_probe based on your requirements.
 
-    # Then collect candidate vectors from your local data or vector database using the query's cluster labels
+    # Then collect candidate vectors from your local data or database using the query's cluster labels
 
 ```
 
