@@ -221,17 +221,18 @@ if target_recall is not None:
 # - max_probe={max_probe}
 ####################################################################################""")
     
-    best_n_probe, best_recall, best_mean_candidate_size = recall_eval.find_optimal_n_probe(
+    optimal_n_probe, achieved_recall, mean_candidate_size = recall_eval.find_optimal_n_probe(
             target_recall, 
             target_recall_k,
             min_probe, 
             max_probe,
             ensemble_selection_method)
-    print(f"best_n_probe={best_n_probe}, best_recall={best_recall}, best_mean_candidate_size={best_mean_candidate_size}")
+    final_result = dict(optimal_n_probe=optimal_n_probe, achieved_recall=achieved_recall, mean_candidate_size=mean_candidate_size)
+    print(json.dumps(final_result))
 
 else: 
     print(f"""
-####################################################################################
+########################################################f############################
 # Calculating recall
 # 
 # Parameters: 
