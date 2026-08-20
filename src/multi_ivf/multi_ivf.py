@@ -22,15 +22,24 @@ class MultiIVF:
     n_init : int, default=1
         Number of KMeans initializations.
     n_iters_finish : int, default=0
-        Number of additional refinement iterations.
+        Number of additional exact K-means refinement iterations (via `_exact_kmeans`)
+        applied after Faiss K-means training. If 0, this refinement step is skipped.
     tol : float, default=1e-5
-        Convergence tolerance for KMeans.
+        Convergence tolerance used only by the exact K-means refinement step
+        (`_exact_kmeans`), i.e. only when n_iters_finish > 0. Faiss itself has
+        no tol parameter; this is unrelated to Faiss's KMeans convergence.
     use_mean_centering : bool, default=False
         Whether to apply mean centering to the vectors.
-    max_seed : int, default=99999
-        Maximum value used when generating random seeds.
+    normalize : bool, default=True
+            Whether to L2-normalize input vectors via faiss.normalize_L2 during train/assign/search.
+    copy : bool, default=True
+        Whether array-mutating operations (validation, normalization, mean centering)
+        copy the input first rather than modifying it in place. Must not be False when
+        use_mean_centering=True (enforced by the ValueError at the top of __init__).
     gpu_id : int | None, default=None
         GPU device ID. If None, CPU is used.
+    max_seed : int, default=99999
+        Maximum value used when generating random seeds.
     random_state : int, default=432
         Random seed for reproducibility.
     tqdm_disable : bool, default=True
@@ -41,18 +50,18 @@ class MultiIVF:
             n_clusters:int, 
             n_ensembles:int=10, 
             max_iter:int=20, 
-            max_points_per_centroid:int=100,
+            max_points_per_centroid:int=256,
             flat_search_batch_size:int=8192,
             n_init:int=1, 
             n_iters_finish:int=0, 
             tol:float=1e-5, 
-            use_mean_centering:bool=False, 
+            use_mean_centering:bool=True, 
+            normalize:bool=True,
+            copy:bool=True,
+            gpu_id:int=None,
             max_seed:int=99999, 
-            gpu_id:int=None, 
             random_state:int=432, 
             tqdm_disable:bool=True,
-            copy:bool=True,
-            normalize:bool=True,
         ):
         if copy == False and use_mean_centering == True:
             raise ValueError("copy=False cannot be used together with use_mean_centering=True because mean centering modifies the input data in-place and irreversibly. Please set use_mean_centering=False and provide data that has already been mean-centered.")
@@ -72,10 +81,13 @@ class MultiIVF:
         self.tqdm_disable = tqdm_disable
         self.copy = copy
         self.normalize = normalize
-
+        # parameters filled after `train`
         self.cluster_centers_ = None
         self.gpu_res_ = None
         self.mean_centers_ = None
+
+        if not self.is_gpu_available():
+            self.gpu_id = None
 
 
     ########################################
@@ -86,10 +98,12 @@ class MultiIVF:
 
 
     @classmethod
-    def load(cls, path:str, gpu_id=None):
+    def load(cls, path:str, gpu_id:int=None):
         obj = joblib.load(path)
-        if gpu_id is not None:
+        if gpu_id is not None and cls.is_gpu_available():
             obj.gpu_id = gpu_id
+        else:
+            obj.gpu_id = None
         return obj
 
 
@@ -128,7 +142,7 @@ class MultiIVF:
             yield start, X[start:end]
 
 
-    def _generate_faiss_flat_index(self, dim):
+    def _generate_faiss_flat_index(self, dim:int):
         if self.gpu_id is None:
             return faiss.IndexFlatIP(dim)
 
@@ -138,7 +152,18 @@ class MultiIVF:
         cpu_index = faiss.IndexFlatIP(dim)
         index = faiss.index_cpu_to_gpu(self.gpu_res_, 0, cpu_index)
         return index
-    
+
+
+    @classmethod
+    def is_gpu_available(cls):
+        try:
+            n_gpus = faiss.get_num_gpus()
+            gpu_available = n_gpus > 0
+        except AttributeError:
+            gpu_available = False
+
+        return gpu_available
+
 
     def _validate_input_array(self, X: np.ndarray) -> np.ndarray:
         if not isinstance(X, np.ndarray):
@@ -194,7 +219,7 @@ class MultiIVF:
         seed: int,
         max_iter: int = 10,
         nredo: int = 1,
-        init_centroids=None
+        init_centroids:np.ndarray=None
     ) -> np.ndarray:
         N, D = X.shape
         if N == 0:
@@ -282,7 +307,7 @@ class MultiIVF:
         return cent, all_labels
 
 
-    def train(self, X, init_centroids_list:list=None):
+    def train(self, X:np.ndarray, init_centroids_list:list=None):
         X = self._validate_input_array(X)
 
         if self.normalize:
@@ -330,7 +355,7 @@ class MultiIVF:
         self.cluster_centers_ = cluster_centers_
 
 
-    def _assign_once(self, X, centroids, assign_margin: float | None, n_assignments: int | None) -> list[list[int]]:
+    def _assign_once(self, X:np.ndarray, centroids:np.ndarray, assign_margin: float | None, n_assignments: int | None) -> list[list[int]]:
         if centroids.dtype != np.float32:
             raise ValueError("centroids.dtype must be np.float32")
         if X.dtype != np.float32:
@@ -366,7 +391,7 @@ class MultiIVF:
         return list(labels)
     
 
-    def assign(self, X:np.ndarray, assign_margin:float=0.1, n_assignments=None) -> list[dict[int, list[int]]]:
+    def assign(self, X:np.ndarray, assign_margin:float=0.1, n_assignments:int=None) -> list[dict[int, list[int]]]:
         """
         Assign cluster labels for each embedding data
         """
@@ -396,7 +421,7 @@ class MultiIVF:
         return assignments
 
 
-    def _choose_ensemble_by_mean_distance(self, query, n_probe, use_weighted_mean=False) -> tuple[int, np.ndarray]:
+    def _choose_ensemble_by_mean_distance(self, query:np.ndarray, n_probe:int, use_weighted_mean=False) -> tuple[int, np.ndarray]:
         """
         Select the seed (cluster group) whose top-`n_probe` centroids have the
         highest mean similarity to the query, and return that seed along with
@@ -433,7 +458,7 @@ class MultiIVF:
 
 
     def _choose_ensembles_by_mean_distance(
-        self, query, n_probe
+        self, query:np.ndarray, n_probe:int
     ) -> tuple[list[tuple[int, int]], np.ndarray]:
         """
         Select the top-`n_probe` centroids across all ensembles based on
