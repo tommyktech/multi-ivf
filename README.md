@@ -5,7 +5,7 @@
 
 `multi-ivf` is a high-efficiency IVF library for approximate nearest neighbor search.
 
-It achieves the same recall as conventional IVF with significantly fewer candidate vectors (around **40-50% reduction**), reducing the computational cost of the final exact KNN search.
+It achieves the same recall as conventional IVF **with significantly fewer candidate vectors (around 40-50% reduction**), reducing the computational cost of the final exact KNN search.
 
 Unlike end-to-end ANN libraries, this library focuses only on clustering, making it easy to integrate with any database.
 
