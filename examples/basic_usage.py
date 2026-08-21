@@ -30,7 +30,9 @@ def print_side_by_side(left_title, left_lines, right_title, right_lines):
 #############################
 import pandas as pd
 import numpy as np
-df = pd.read_parquet("./data/wiki40b_en_embeddings_30000.parquet")
+from pathlib import Path
+sample_dataset_path = Path(__file__).resolve().parent / "./data/wiki40b_en_embeddings_30000.parquet"
+df = pd.read_parquet(sample_dataset_path)
 df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
 
@@ -48,7 +50,6 @@ X_query  = np.stack(df_query.embedding.values)
 #############################
 # Train multi ivf model
 #############################
-output_path = "output/multi_ivf.joblib"
 # train mIVF
 print("Training MultiIVF...")
 n_ensembles = 10
@@ -64,6 +65,9 @@ mivf = MultiIVF(
     )
 
 mivf.train(X_train)
+
+# save model
+output_path = Path(__file__).resolve().parent / "./output/multi_ivf.joblib"
 mivf.save(output_path)
 
 #############################
