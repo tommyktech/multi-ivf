@@ -88,21 +88,30 @@ pip install https://github.com/tommyktech/multi-ivf/releases/download/0.1.1/mult
 For a complete working example, see `examples/basic_usage.py`.
 
 ```python
+import numpy as np
+import pandas as pd
+import faiss
 from multi_ivf import MultiIVF
+from sklearn.model_selection import train_test_split
 
 # Load sample dataset
-X_train, X_query = ...  # Your embedding vectors (NumPy arrays)
+df = pd.read_...  # Your dataset
+df_train, df_query = train_test_split(df, test_size=100, random_state=42)
+
+# Extract embedding vectors as 2D numpy arrays
+X_train = np.vstack(df_train["embedding"].values).astype('float32')
+X_query = np.vstack(df_query["embedding"].values).astype('float32')
 
 # Determine n_clusters. 50–100 vectors per cluster are generally sufficient.
 N = X_train.shape[0]
-n_clusters = int(N / 100)
+n_clusters = max(1, int(N / 100))
 
 # Initialize
 mivf = MultiIVF(
-    n_clusters = n_clusters,
-    n_ensembles = 10, # Sufficient for most use cases
-    use_mean_centering = True,
-    gpu_id = 0, # If not set, only CPUs will be used
+    n_clusters=n_clusters,
+    n_ensembles=10,  # Sufficient for most use cases
+    use_mean_centering=True,
+    gpu_id=0,  # If not set, only CPUs will be used
 )
 
 # Train
@@ -115,19 +124,43 @@ mivf.save(model_path)
 # Load model from file
 mivf = MultiIVF.load(model_path)
 
-# Assign labels to data
+# Assign labels to each row
 assignments = mivf.assign(
     X_train,
-    assign_margin = 0.1, # Sufficient for most use cases
-    n_assignments = 50 # Specify a value smaller than n_clusters. Depending on n_clusters, around 50–100 is usually sufficient.
+    assign_margin=0.1,  # Sufficient for most use cases
+    n_assignments=50    # Specify a value smaller than n_clusters. Around 50–100 is usually sufficient.
 )
 
+# Convert assignments to label lists per row
+labels_per_row = []
+for assign in assignments:
+    labels_per_row.append([f"{ensemble_label}_{cluster_label}" for ensemble_label, cluster_labels in assign.items() for cluster_label in cluster_labels])
+
+df_train["cluster_label"] = labels_per_row
+
 # Search for candidate data
+n_probe = 10
 for query in X_query:
-    q_ensemble, q_labels = mivf.search(query, n_probe=10) # Choose n_probe based on your requirements.
+    q_ensemble_label, q_cluster_labels = mivf.search(query, n_probe=n_probe)  # Choose n_probe based on your requirements.
 
     # Then collect candidate vectors from your local data or database using the query's cluster labels
+    q_labels_set = {f"{q_ensemble_label}_{q_cluster_label}" for q_cluster_label in q_cluster_labels}
+    df_candidate = df_train.loc[df_train["cluster_label"].apply(lambda labels: not q_labels_set.isdisjoint(labels))]
 
+    X_candidate = np.vstack(df_candidate["embedding"].values).astype('float32')
+    query_2d = np.array(query).reshape(1, -1).astype('float32')
+
+    # Build FAISS index and add vectors
+    d = X_candidate.shape[1]
+    index = faiss.IndexFlatL2(d)
+    index.add(X_candidate)
+
+    # Search Top-K
+    topk = 10
+    distances, indices = index.search(query_2d, topk)
+
+    # Retrieve target rows
+    df_topk = df_candidate.iloc[indices[0]]
 ```
 
 ## Algorithm Overview
