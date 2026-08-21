@@ -33,7 +33,7 @@ Below is an example of the command used for the benchmark measurements:
 ```bash
 python scripts/benchmarks/run_recall_evaluation.py \
     --input scripts/data/wiki40b_en_embeddings_1000000.npy \
-    --train_size 999000 \
+    --train_size 999496 \
     --query_size 1000 \
     --use_mean_centering true \
     --n_ensembles 10 \
